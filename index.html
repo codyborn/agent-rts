@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent RTS</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a1a2e;
+      overflow: hidden;
+      font-family: 'Courier New', monospace;
+      color: #e0e0e0;
+    }
+    #game-container {
+      display: flex;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+    }
+    #game-canvas {
+      flex: 1;
+      min-width: 0;
+      cursor: crosshair;
+    }
+    #sidebar {
+      width: 300px;
+      min-width: 300px;
+      flex-shrink: 0;
+      background: #16213e;
+      border-left: 2px solid #0f3460;
+      display: flex;
+      flex-direction: column;
+    }
+    #minimap-canvas {
+      width: 100%;
+      height: 200px;
+      border-bottom: 2px solid #0f3460;
+    }
+    #unit-info {
+      padding: 10px;
+      border-bottom: 2px solid #0f3460;
+      min-height: 120px;
+      overflow-wrap: break-word;
+    }
+    #chat-log {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+      font-size: 12px;
+    }
+    #chat-log .message {
+      margin-bottom: 4px;
+      cursor: pointer;
+      padding: 2px 4px;
+      border-radius: 3px;
+    }
+    #chat-log .message:hover {
+      background: rgba(255,255,255,0.1);
+    }
+    #chat-log .command { color: #53d769; }
+    #chat-log .communication { color: #5ac8fa; }
+    #chat-log .observation { color: #ffcc02; }
+    #chat-log .action { color: #ff9500; }
+    #chat-log .status { color: #8e8e93; }
+    #resource-bar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 300px;
+      height: 30px;
+      background: #16213e;
+      border-bottom: 2px solid #0f3460;
+      display: flex;
+      align-items: center;
+      padding: 0 15px;
+      gap: 20px;
+      font-size: 14px;
+      z-index: 10;
+    }
+    .resource { display: flex; align-items: center; gap: 5px; }
+    .resource-minerals { color: #5ac8fa; }
+    .resource-energy { color: #ffcc02; }
+    #command-bar {
+      position: fixed;
+      bottom: 52px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(22, 33, 62, 0.95);
+      border: 1px solid #0f3460;
+      border-radius: 8px;
+      display: none;
+      z-index: 20;
+      align-items: center;
+      gap: 0;
+      width: 400px;
+      max-width: calc(100vw - 340px);
+    }
+    #command-bar.visible {
+      display: flex;
+    }
+    #command-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: #e0e0e0;
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+      padding: 10px 14px;
+    }
+    #command-input::placeholder {
+      color: #555;
+    }
+    #mic-btn {
+      background: none;
+      border: none;
+      border-left: 1px solid #0f3460;
+      color: #8e8e93;
+      cursor: pointer;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      transition: color 0.2s;
+    }
+    #mic-btn:hover { color: #5ac8fa; }
+    #grid-tooltip {
+      position: fixed;
+      pointer-events: none;
+      background: rgba(22, 33, 62, 0.9);
+      color: #e0e0e0;
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      border: 1px solid #0f3460;
+      z-index: 30;
+      display: none;
+    }
+    #mic-btn.recording {
+      color: #ff3b30;
+      animation: pulse 1s infinite;
+    }
+    #voice-indicator {
+      position: fixed;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(22, 33, 62, 0.9);
+      padding: 8px 16px;
+      border-radius: 20px;
+      border: 1px solid #0f3460;
+      display: none;
+      z-index: 20;
+    }
+    #voice-indicator.active {
+      display: block;
+      border-color: #ff3b30;
+      animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+    #hotkey-bar {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 300px;
+      height: 40px;
+      background: #16213e;
+      border-top: 2px solid #0f3460;
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      gap: 5px;
+      font-size: 11px;
+      z-index: 10;
+    }
+    .hotkey-slot {
+      width: 50px;
+      height: 30px;
+      border: 1px solid #0f3460;
+      border-radius: 4px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+    }
+    .hotkey-slot.active { border-color: #53d769; }
+    .hotkey-slot .key { color: #8e8e93; font-size: 9px; }
+    .hotkey-slot .count { color: #e0e0e0; }
+  </style>
+</head>
+<body>
+  <div id="resource-bar">
+    <div class="resource resource-minerals">
+      <span>Minerals:</span>
+      <span id="minerals-count">500</span>
+    </div>
+    <div class="resource resource-energy">
+      <span>Energy:</span>
+      <span id="energy-count">200</span>
+    </div>
+    <div id="tick-display" style="margin-left: auto; color: #8e8e93;">Tick: 0</div>
+  </div>
+
+  <div id="game-container">
+    <canvas id="game-canvas"></canvas>
+    <div id="sidebar">
+      <canvas id="minimap-canvas"></canvas>
+      <div id="unit-info">
+        <div style="color: #8e8e93; font-size: 11px;">No unit selected</div>
+      </div>
+      <div id="chat-log"></div>
+    </div>
+  </div>
+
+  <div id="hotkey-bar">
+    <div class="hotkey-slot" id="hotkey-1"><span class="key">1</span><span class="count">-</span></div>
+    <div class="hotkey-slot" id="hotkey-2"><span class="key">2</span><span class="count">-</span></div>
+    <div class="hotkey-slot" id="hotkey-3"><span class="key">3</span><span class="count">-</span></div>
+    <div class="hotkey-slot" id="hotkey-4"><span class="key">4</span><span class="count">-</span></div>
+    <div class="hotkey-slot" id="hotkey-5"><span class="key">5</span><span class="count">-</span></div>
+    <div class="hotkey-slot" id="hotkey-6"><span class="key">6</span><span class="count">-</span></div>
+    <div class="hotkey-slot" id="hotkey-7"><span class="key">7</span><span class="count">-</span></div>
+    <div class="hotkey-slot" id="hotkey-8"><span class="key">8</span><span class="count">-</span></div>
+    <div class="hotkey-slot" id="hotkey-9"><span class="key">9</span><span class="count">-</span></div>
+    <div class="hotkey-slot" id="hotkey-0"><span class="key">0</span><span class="count">-</span></div>
+  </div>
+
+  <div id="grid-tooltip"></div>
+
+  <div id="command-bar">
+    <input id="command-input" type="text" placeholder="Issue a command..." autocomplete="off" />
+    <button id="mic-btn" title="Voice input (or hold V)">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+        <line x1="12" y1="19" x2="12" y2="23"/>
+        <line x1="8" y1="23" x2="16" y2="23"/>
+      </svg>
+    </button>
+  </div>
+
+  <div id="voice-indicator">
+    Listening...
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
