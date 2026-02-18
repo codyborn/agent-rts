@@ -241,7 +241,13 @@ export class GameMap {
     this.clearCorner(this.height - 5, 0, 5);                    // bottom-left
     this.clearCorner(this.height - 5, this.width - 5, 5);       // bottom-right
 
-    // Step 3: Place resource deposits
+    // Step 3: Ensure walkable connectivity between corners
+    this.ensureCornerConnectivity();
+
+    // Step 4: Place starter resource patches near each base corner
+    this.placeStarterResources();
+
+    // Step 5: Place resource deposits
     this.placeResources(rng);
   }
 
@@ -262,6 +268,109 @@ export class GameMap {
           };
         }
       }
+    }
+  }
+
+  /**
+   * Places small mineral and energy patches adjacent to each base corner
+   * so players have resources to kick-start their economy without long walks.
+   * Minerals are placed 5-7 tiles from the corner, energy 6-8 tiles.
+   */
+  private placeStarterResources(): void {
+    const corners = [
+      { row: 0, col: 0 },                                          // top-left
+      { row: this.height - 5, col: this.width - 5 },               // bottom-right
+    ];
+
+    for (const corner of corners) {
+      // Mineral patch: 3 tiles in an L just outside the 5x5 cleared zone
+      const mineralPositions = [
+        { col: corner.col + 5, row: corner.row + 2 },
+        { col: corner.col + 5, row: corner.row + 3 },
+        { col: corner.col + 6, row: corner.row + 3 },
+      ];
+      for (const pos of mineralPositions) {
+        if (!this.isInBounds(pos)) continue;
+        this.tiles[pos.row][pos.col] = {
+          terrain: TerrainType.PLAINS,
+          resource: ResourceType.MINERALS,
+          resourceAmount: 1000,
+          walkable: true,
+          movementCost: TERRAIN_MOVEMENT_COST[TerrainType.PLAINS],
+        };
+      }
+
+      // Energy patch: 2 tiles offset from minerals
+      const energyPositions = [
+        { col: corner.col + 3, row: corner.row + 5 },
+        { col: corner.col + 4, row: corner.row + 5 },
+      ];
+      for (const pos of energyPositions) {
+        if (!this.isInBounds(pos)) continue;
+        this.tiles[pos.row][pos.col] = {
+          terrain: TerrainType.PLAINS,
+          resource: ResourceType.ENERGY,
+          resourceAmount: 800,
+          walkable: true,
+          movementCost: TERRAIN_MOVEMENT_COST[TerrainType.PLAINS],
+        };
+      }
+    }
+  }
+
+  /**
+   * Ensures that the top-left and bottom-right corners are connected
+   * by a walkable path. If BFS from (2,2) cannot reach (height-3, width-3),
+   * carves a walkable corridor between them.
+   */
+  private ensureCornerConnectivity(): void {
+    const start: GridPosition = { col: 2, row: 2 };
+    const end: GridPosition = { col: this.width - 3, row: this.height - 3 };
+
+    // BFS from start to see if end is reachable
+    const visited = new Set<string>();
+    const queue: GridPosition[] = [start];
+    visited.add(`${start.col},${start.row}`);
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (current.col === end.col && current.row === end.row) {
+        return; // Already connected
+      }
+      for (const offset of NEIGHBOR_OFFSETS) {
+        const neighbor = { col: current.col + offset.dc, row: current.row + offset.dr };
+        const key = `${neighbor.col},${neighbor.row}`;
+        if (!visited.has(key) && this.isInBounds(neighbor) && this.tiles[neighbor.row][neighbor.col].walkable) {
+          visited.add(key);
+          queue.push(neighbor);
+        }
+      }
+    }
+
+    // Not connected — carve a walkable L-shaped corridor
+    // Go right from start to end.col, then down to end.row
+    for (let col = start.col; col <= end.col; col++) {
+      this.carveTile(start.row, col);
+    }
+    for (let row = start.row; row <= end.row; row++) {
+      this.carveTile(row, end.col);
+    }
+  }
+
+  /**
+   * Converts a tile to walkable PLAINS if it is currently impassable.
+   */
+  private carveTile(row: number, col: number): void {
+    if (!this.isInBounds({ col, row })) return;
+    const tile = this.tiles[row][col];
+    if (!tile.walkable) {
+      this.tiles[row][col] = {
+        terrain: TerrainType.PLAINS,
+        resource: null,
+        resourceAmount: 0,
+        walkable: true,
+        movementCost: TERRAIN_MOVEMENT_COST[TerrainType.PLAINS],
+      };
     }
   }
 

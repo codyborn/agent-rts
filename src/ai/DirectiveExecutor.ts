@@ -13,6 +13,7 @@ import {
 import { Unit } from '../units/Unit';
 import { UnitManager } from '../units/UnitManager';
 import { GameMap } from '../map/GameMap';
+import { GameState } from '../engine/GameState';
 import { FogOfWar } from '../map/FogOfWar';
 import { EventBus } from '../engine/EventBus';
 
@@ -47,11 +48,14 @@ export class DirectiveExecutor {
   /** Directive cache for looking up a unit's current directive type in event handlers. */
   private activeDirectives: Map<string, DirectiveType> = new Map();
 
-  constructor(unitManager: UnitManager, gameMap: GameMap, fogOfWar: FogOfWar, playerId: string, eventBus?: EventBus) {
+  private readonly gameState?: GameState;
+
+  constructor(unitManager: UnitManager, gameMap: GameMap, fogOfWar: FogOfWar, playerId: string, eventBus?: EventBus, gameState?: GameState) {
     this.unitManager = unitManager;
     this.gameMap = gameMap;
     this.fogOfWar = fogOfWar;
     this.playerId = playerId;
+    this.gameState = gameState;
 
     if (eventBus) {
       eventBus.on<{ unitId: string; position: GridPosition }>(GameEventType.RESOURCE_NEARBY, (data) => {
@@ -286,7 +290,7 @@ export class DirectiveExecutor {
   }
 
   private executeAttackMove(unit: Unit, directive: Directive): UnitAction | null {
-    // Engage enemies encountered
+    // Engage enemy units first
     const nearbyEnemies = this.getVisibleEnemies(unit);
     if (nearbyEnemies.length > 0) {
       const nearest = this.findClosestUnit(unit.position, nearbyEnemies);
@@ -297,6 +301,24 @@ export class DirectiveExecutor {
           details: `Engaging ${nearest.type} during attack move`,
         };
       }
+    }
+
+    // No enemy units — check for enemy buildings nearby
+    const enemyBuilding = this.findNearestEnemyBuilding(unit);
+    if (enemyBuilding) {
+      const dist = gridDistance(unit.position, enemyBuilding.position);
+      if (dist <= UNIT_STATS[unit.type].attackRange + 2) {
+        return {
+          type: 'attack',
+          targetUnitId: enemyBuilding.id,
+          details: `Attacking enemy ${enemyBuilding.type}`,
+        };
+      }
+      return {
+        type: 'move',
+        target: enemyBuilding.position,
+        details: `Moving to attack enemy ${enemyBuilding.type}`,
+      };
     }
 
     // Move toward target
@@ -569,6 +591,23 @@ export class DirectiveExecutor {
       }
     }
     return closest;
+  }
+
+  private findNearestEnemyBuilding(unit: Unit): import('../shared/types').BuildingState | null {
+    if (!this.gameState) return null;
+    const visionRange = UNIT_STATS[unit.type].visionRange;
+    let nearest: import('../shared/types').BuildingState | null = null;
+    let nearestDist = Infinity;
+    for (const building of this.gameState.getAllBuildings()) {
+      if (building.playerId === this.playerId) continue;
+      if (building.health <= 0) continue;
+      const dist = gridDistance(unit.position, building.position);
+      if (dist <= visionRange && dist < nearestDist) {
+        nearest = building;
+        nearestDist = dist;
+      }
+    }
+    return nearest;
   }
 
   /** Remove all tracking state for a destroyed unit. */

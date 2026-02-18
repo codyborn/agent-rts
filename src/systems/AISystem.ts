@@ -62,6 +62,7 @@ export class AISystem implements System {
 
   /** Reference to the event bus, stored during init(). */
   private eventBus: EventBus | null = null;
+  private gameState: import('../engine/GameState').GameState | null = null;
 
   /** Per-unit tracking to avoid spamming proximity events every tick. */
   private lastNotifiedResource: Map<string, string> = new Map(); // unitId -> "col,row"
@@ -89,6 +90,7 @@ export class AISystem implements System {
 
   init(engine: GameEngine): void {
     this.eventBus = engine.eventBus;
+    this.gameState = engine.state;
 
     // Clean up tracking state when a unit is destroyed
     this.eventBus.on(GameEventType.UNIT_DESTROYED, (data: any) => {
@@ -378,6 +380,21 @@ export class AISystem implements System {
     if (path.length > 0) {
       unit.setPath(path);
       unit.behaviorState = UnitBehaviorState.MOVING;
+      return;
+    }
+
+    // Direct path failed — try an intermediate waypoint halfway to the target.
+    const mid: GridPosition = {
+      col: Math.round((unit.position.col + action.target.col) / 2),
+      row: Math.round((unit.position.row + action.target.row) / 2),
+    };
+    const midWalkable = this.gameMap.findOpenPosition(mid, 5);
+    if (midWalkable) {
+      const midPath = findPath(unit.position, midWalkable, this.gameMap, unit.type);
+      if (midPath.length > 0) {
+        unit.setPath(midPath);
+        unit.behaviorState = UnitBehaviorState.MOVING;
+      }
     }
   }
 
@@ -399,6 +416,15 @@ export class AISystem implements System {
 
     unit.behaviorState = UnitBehaviorState.ATTACKING;
     unit.attackTargetId = action.targetUnitId;
+
+    // If targeting a building, pathfind toward it
+    if (action.targetUnitId.startsWith('building_')) {
+      const building = this.gameState?.getBuilding(action.targetUnitId);
+      if (building && (!unit.path || unit.path.length === 0)) {
+        const path = findPath(unit.position, building.position, this.gameMap, unit.type);
+        if (path.length > 0) unit.setPath(path);
+      }
+    }
   }
 
   private executeBuild(unit: Unit): void {

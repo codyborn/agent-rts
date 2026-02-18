@@ -149,6 +149,7 @@ export class ResourceSystem implements System {
       // Local player units: go IDLE so the DirectiveExecutor decides what to do next.
       if (unit.playerId === this.localPlayerId) {
         unit.behaviorState = UnitBehaviorState.IDLE;
+        unit.autoReturn = false;
       } else {
         // AI units: auto-restart the gather cycle.
         unit.behaviorState = UnitBehaviorState.GATHERING;

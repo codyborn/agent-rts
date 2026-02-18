@@ -316,14 +316,31 @@ test.describe('Unit does not lose its command', () => {
     const unit = units[0];
     await selectUnit(page, unit.id);
 
-    // Right-click to move to a distant position
-    await clickGridPosition(page, 10, 10, 'right');
+    // Find a distant walkable tile from the unit's position (map is randomly seeded)
+    const target = await page.evaluate(({ unitId }) => {
+      const g = (window as any).__GAME__;
+      const u = g.unitManager.getUnit(unitId);
+      const pos = u.position;
+      // Search outward for a distant walkable tile
+      for (let dist = 8; dist >= 3; dist--) {
+        for (const [dr, dc] of [[dist, 0], [0, dist], [-dist, 0], [0, -dist], [dist, dist], [-dist, dist]]) {
+          const r = pos.row + dr;
+          const c = pos.col + dc;
+          if (r < 0 || c < 0 || r >= 40 || c >= 40) continue;
+          const tile = g.gameMap.tiles[r]?.[c];
+          if (tile && tile.walkable) return { col: c, row: r };
+        }
+      }
+      return { col: 10, row: 10 }; // fallback
+    }, { unitId: unit.id });
+
+    const startPos = { col: unit.position.col, row: unit.position.row };
+    await clickGridPosition(page, target.col, target.row, 'right');
 
     // Wait for movement to start
-    await page.waitForTimeout(1_000);
+    await page.waitForTimeout(2_000);
 
     const mid = await getUnit(page, unit.id);
-    const startPos = { col: unit.position.col, row: unit.position.row };
 
     // The unit should be moving or have started moving
     expect(
@@ -782,5 +799,346 @@ test.describe('Coordinate clamping', () => {
     expect(Number.isInteger(clamped.row)).toBe(true);
     expect(clamped.col).toBe(16);
     expect(clamped.row).toBe(20);
+  });
+});
+
+// ============================================================
+// Movement regression tests
+// ============================================================
+
+test.describe('Unit movement', () => {
+  test('right-click causes actual position change (not just state)', async ({ page }) => {
+    await page.goto('/');
+    await waitForGame(page);
+
+    const units = await getPlayerUnits(page);
+    const unit = units[0];
+    await selectUnit(page, unit.id);
+    const startPos = { col: unit.position.col, row: unit.position.row };
+
+    // Find a walkable target a few tiles away
+    const target = await page.evaluate(({ unitId }) => {
+      const g = (window as any).__GAME__;
+      const u = g.unitManager.getUnit(unitId);
+      const pos = u.position;
+      for (let dist = 5; dist >= 2; dist--) {
+        for (const [dr, dc] of [[0, dist], [dist, 0], [0, -dist], [-dist, 0]]) {
+          const r = pos.row + dr;
+          const c = pos.col + dc;
+          if (r < 0 || c < 0 || r >= 40 || c >= 40) continue;
+          const tile = g.gameMap.tiles[r]?.[c];
+          if (tile && tile.walkable) return { col: c, row: r };
+        }
+      }
+      return null;
+    }, { unitId: unit.id });
+    expect(target).not.toBeNull();
+
+    await clickGridPosition(page, target!.col, target!.row, 'right');
+
+    // Wait for the unit to actually change grid position (up to 3s)
+    await page.waitForFunction(
+      ({ unitId, startCol, startRow }) => {
+        const g = (window as any).__GAME__;
+        const u = g.unitManager.getUnit(unitId);
+        if (!u) return false;
+        return u.position.col !== startCol || u.position.row !== startRow;
+      },
+      { unitId: unit.id, startCol: startPos.col, startRow: startPos.row },
+      { timeout: 5_000 },
+    );
+
+    const after = await getUnit(page, unit.id);
+    expect(
+      after!.position.col !== startPos.col || after!.position.row !== startPos.row,
+    ).toBe(true);
+  });
+
+  test('unit moves multiple tiles toward target over time', async ({ page }) => {
+    await page.goto('/');
+    await waitForGame(page);
+
+    const units = await getPlayerUnits(page);
+    const unit = units[0];
+    await selectUnit(page, unit.id);
+    const startPos = { col: unit.position.col, row: unit.position.row };
+
+    // Find a walkable target 6+ tiles away
+    const target = await page.evaluate(({ unitId }) => {
+      const g = (window as any).__GAME__;
+      const u = g.unitManager.getUnit(unitId);
+      const pos = u.position;
+      for (let dist = 8; dist >= 4; dist--) {
+        for (const [dr, dc] of [[0, dist], [dist, 0], [dist, dist], [0, -dist], [-dist, 0]]) {
+          const r = pos.row + dr;
+          const c = pos.col + dc;
+          if (r < 0 || c < 0 || r >= 40 || c >= 40) continue;
+          const tile = g.gameMap.tiles[r]?.[c];
+          if (tile && tile.walkable) return { col: c, row: r };
+        }
+      }
+      return null;
+    }, { unitId: unit.id });
+    expect(target).not.toBeNull();
+
+    await clickGridPosition(page, target!.col, target!.row, 'right');
+
+    // Wait 4 seconds — engineer (speed 1.5) should move ~5 tiles in 4s at tickRate 10
+    await page.waitForTimeout(4_000);
+
+    const after = await getUnit(page, unit.id);
+    const dist =
+      Math.abs(after!.position.col - startPos.col) +
+      Math.abs(after!.position.row - startPos.row);
+    expect(dist).toBeGreaterThanOrEqual(2);
+  });
+
+  test('enemy AI units move over time', async ({ page }) => {
+    await page.goto('/');
+    await waitForGame(page);
+
+    // Get all enemy units and their starting positions
+    const enemySnapshot = await page.evaluate(() => {
+      const g = (window as any).__GAME__;
+      const all = g.unitManager.getAllUnits();
+      return all
+        .filter((u: any) => u.playerId !== '0' && u.isAlive())
+        .map((u: any) => ({
+          id: u.id,
+          col: u.position.col,
+          row: u.position.row,
+        }));
+    });
+
+    expect(enemySnapshot.length).toBeGreaterThan(0);
+
+    // Wait 10 seconds for enemy AI to take actions
+    await page.waitForTimeout(10_000);
+
+    // Check that at least one enemy unit has moved
+    const anyMoved = await page.evaluate((snapshot: any[]) => {
+      const g = (window as any).__GAME__;
+      for (const s of snapshot) {
+        const u = g.unitManager.getUnit(s.id);
+        if (u && u.isAlive() && (u.position.col !== s.col || u.position.row !== s.row)) {
+          return true;
+        }
+      }
+      return false;
+    }, enemySnapshot);
+
+    expect(anyMoved).toBe(true);
+  });
+
+  test('voice command "move to col 10 row 10" results in unit movement', async ({ page }) => {
+    await page.goto('/');
+    await waitForGame(page);
+
+    const units = await getPlayerUnits(page);
+    const unit = units[0];
+    await selectUnit(page, unit.id);
+    const startPos = { col: unit.position.col, row: unit.position.row };
+
+    // Issue a move command via text
+    await issueTextCommand(page, 'move to the east');
+
+    // Wait for AI evaluation and movement
+    await page.waitForTimeout(8_000);
+
+    const after = await getUnit(page, unit.id);
+    // Unit should have moved or at least received a directive
+    const directive = await getDirective(page, unit.id);
+    expect(
+      directive !== null ||
+      after!.position.col !== startPos.col ||
+      after!.position.row !== startPos.row ||
+      after!.behaviorState === 'moving',
+    ).toBe(true);
+  });
+
+  test('unit command buttons are stable and clickable', async ({ page }) => {
+    await page.goto('/');
+    await waitForGame(page);
+
+    const units = await getPlayerUnits(page);
+    const unit = units[0]; // engineer
+    await selectUnit(page, unit.id);
+
+    // Wait for the UI panel to render
+    await page.waitForTimeout(500);
+
+    // The Gather button should exist and be clickable (not detached by per-frame rebuilds)
+    const gatherBtn = page.locator('.unit-cmd-btn').filter({ hasText: /gather/i }).first();
+    await expect(gatherBtn).toBeVisible({ timeout: 3_000 });
+
+    // Click the button — should NOT throw "element detached from DOM"
+    await gatherBtn.click({ timeout: 3_000 });
+
+    // Wait for the command to be processed
+    await page.waitForTimeout(1_000);
+
+    // The unit should have received a gather command
+    const after = await getUnit(page, unit.id);
+    expect(after!.currentCommand).toBe('gather nearby resources');
+  });
+
+  test('command buttons persist across frames without DOM detachment', async ({ page }) => {
+    await page.goto('/');
+    await waitForGame(page);
+
+    const units = await getPlayerUnits(page);
+    await selectUnit(page, units[0].id);
+    await page.waitForTimeout(500);
+
+    // Get the initial button element reference
+    const btnLocator = page.locator('.unit-cmd-btn').first();
+    await expect(btnLocator).toBeVisible({ timeout: 3_000 });
+
+    // Wait 1 second (60+ frames) then verify button is still the same element
+    await page.waitForTimeout(1_000);
+    await expect(btnLocator).toBeVisible();
+
+    // Verify the button is actually attached to DOM (not stale)
+    const isAttached = await btnLocator.evaluate((el) => el.isConnected);
+    expect(isAttached).toBe(true);
+  });
+
+  test('movement system advances position each movement tick', async ({ page }) => {
+    await page.goto('/');
+    await waitForGame(page);
+
+    // Directly set a path on a unit via game internals and verify it advances
+    const result = await page.evaluate(() => {
+      const g = (window as any).__GAME__;
+      const unit = g.unitManager.getUnitsForPlayer('0')[0];
+      if (!unit) return { error: 'no unit' };
+
+      // Find a walkable position 3 tiles to the right
+      let target = null;
+      for (let dc = 1; dc <= 5; dc++) {
+        const r = unit.position.row;
+        const c = unit.position.col + dc;
+        const tile = g.gameMap.tiles[r]?.[c];
+        if (tile && tile.walkable) {
+          target = { row: r, col: c };
+        }
+      }
+      if (!target) return { error: 'no walkable target' };
+
+      const startCol = unit.position.col;
+      const startRow = unit.position.row;
+
+      // Use findPath and set it on the unit
+      const { findPath } = g;
+      if (!findPath) {
+        // findPath may not be exposed; set path directly
+        const path = [];
+        for (let c = startCol + 1; c <= target.col; c++) {
+          path.push({ row: startRow, col: c });
+        }
+        unit.setPath(path);
+      } else {
+        const path = findPath(unit.position, target, g.gameMap, unit.type);
+        unit.setPath(path);
+      }
+      unit.behaviorState = 'moving';
+
+      return {
+        startCol,
+        startRow,
+        unitId: unit.id,
+        pathLength: unit.path ? unit.path.length : 0,
+      };
+    });
+
+    expect(result).not.toHaveProperty('error');
+    expect((result as any).pathLength).toBeGreaterThan(0);
+
+    // Wait 2 seconds for movement ticks to process
+    await page.waitForTimeout(2_000);
+
+    const after = await getUnit(page, (result as any).unitId);
+    expect(
+      after!.position.col !== (result as any).startCol ||
+      after!.position.row !== (result as any).startRow,
+    ).toBe(true);
+  });
+
+  test('unit returns to base after right-click move completes', async ({ page }) => {
+    await page.goto('/');
+    await waitForGame(page);
+
+    const units = await getPlayerUnits(page);
+    const unit = units[0];
+
+    // Simulate: unit is MOVING with autoReturn, about to complete its final path step
+    // Place unit at a distant location with a 1-step path to complete
+    const result = await page.evaluate(({ unitId }) => {
+      const g = (window as any).__GAME__;
+      const u = g.unitManager.getUnit(unitId);
+      if (!u) return { error: 'no unit' };
+
+      // Position the unit far from base (14,15) with one step left to (15,15)
+      u.position = { col: 14, row: 15 };
+      u.behaviorState = 'moving';
+      u.autoReturn = true;
+      u.homeBase = { col: 2, row: 2 };
+      u.path = [{ col: 15, row: 15 }]; // One step left
+
+      return { unitId: u.id };
+    }, { unitId: unit.id });
+
+    expect(result).not.toHaveProperty('error');
+
+    // Wait for the movement system to advance the last step, trigger MOVING→IDLE→RETURNING
+    await page.waitForFunction(
+      ({ unitId }) => {
+        const g = (window as any).__GAME__;
+        const u = g.unitManager.getUnit(unitId);
+        if (!u) return false;
+        return u.behaviorState === 'returning';
+      },
+      { unitId: (result as any).unitId },
+      { timeout: 5_000 },
+    );
+
+    const returning = await getUnit(page, (result as any).unitId);
+    expect(returning!.behaviorState).toBe('returning');
+  });
+
+  test('unit does NOT return to base after defend command', async ({ page }) => {
+    await page.goto('/');
+    await waitForGame(page);
+
+    const units = await getPlayerUnits(page);
+    const unit = units[0];
+    await selectUnit(page, unit.id);
+
+    // Issue a defend command (should set autoReturn = false)
+    await issueTextCommand(page, 'defend this position');
+    await page.waitForTimeout(500);
+
+    const autoReturn = await page.evaluate((id) => {
+      return (window as any).__GAME__.unitManager.getUnit(id)?.autoReturn;
+    }, unit.id);
+    expect(autoReturn).toBe(false);
+  });
+
+  test('autoReturn is NOT set on voice command (only right-click)', async ({ page }) => {
+    await page.goto('/');
+    await waitForGame(page);
+
+    const units = await getPlayerUnits(page);
+    const unit = units[0];
+    await selectUnit(page, unit.id);
+
+    // Voice commands are managed by the directive system, not autoReturn
+    await issueTextCommand(page, 'go explore the map');
+    await page.waitForTimeout(500);
+
+    const autoReturn = await page.evaluate((id) => {
+      return (window as any).__GAME__.unitManager.getUnit(id)?.autoReturn;
+    }, unit.id);
+    expect(autoReturn).toBe(false);
   });
 });

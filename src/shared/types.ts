@@ -395,13 +395,13 @@ export const UNIT_COSTS: Record<UnitType, Record<ResourceType, number>> = {
 };
 
 export const PRODUCTION_TIME: Record<UnitType, number> = {
-  [UnitType.ENGINEER]:  15,
-  [UnitType.SCOUT]:     10,
-  [UnitType.MESSENGER]: 8,
-  [UnitType.SPY]:       20,
-  [UnitType.SOLDIER]:   12,
-  [UnitType.SIEGE]:     25,
-  [UnitType.CAPTAIN]:   20,
+  [UnitType.ENGINEER]:  60,   // 6s
+  [UnitType.SCOUT]:     40,   // 4s
+  [UnitType.MESSENGER]: 30,   // 3s
+  [UnitType.SPY]:       80,   // 8s
+  [UnitType.SOLDIER]:   50,   // 5s
+  [UnitType.SIEGE]:     100,  // 10s
+  [UnitType.CAPTAIN]:   80,   // 8s
 };
 
 // ============ Building Stats & Costs ============

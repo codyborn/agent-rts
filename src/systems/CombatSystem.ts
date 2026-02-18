@@ -1,5 +1,5 @@
 // ============================================================
-// CombatSystem - Handles unit-to-unit combat resolution
+// CombatSystem - Handles unit-to-unit and unit-to-building combat
 // ============================================================
 // Processes attack cooldowns, executes attacks when units are
 // in range, handles target tracking and pursuit via pathfinding,
@@ -8,10 +8,11 @@
 // Runs each tick in the following order per unit:
 //   1. Decrement attack cooldown (skip unit if still on cooldown)
 //   2. Process active attack orders (damage, kill, chase)
-//   3. Auto-acquire targets for idle combat units
+//   3. Auto-acquire targets for idle combat units (units first, then buildings)
 // ============================================================
 
 import { GameEngine, System } from '../engine/GameEngine';
+import { GameState } from '../engine/GameState';
 import { UnitManager } from '../units/UnitManager';
 import { GameMap } from '../map/GameMap';
 import { findPath } from '../map/Pathfinding';
@@ -21,7 +22,10 @@ import {
   UNIT_STATS,
   GameEventType,
   ATTACK_COOLDOWN_TICKS,
+  BuildingType,
+  BUILDING_STATS,
   gridDistance,
+  BuildingState,
 } from '../shared/types';
 import { EventBus } from '../engine/EventBus';
 
@@ -39,6 +43,7 @@ export class CombatSystem implements System {
     private readonly unitManager: UnitManager,
     private readonly gameMap: GameMap,
     private readonly localPlayerId: string = '0',
+    private readonly gameState?: GameState,
   ) {}
 
   // ---- System lifecycle ----
@@ -110,6 +115,12 @@ export class CombatSystem implements System {
       return;
     }
 
+    // Check if the target is a building
+    if (unit.attackTargetId.startsWith('building_') && this.gameState) {
+      this.processAttackBuilding(unit, tick);
+      return;
+    }
+
     const target = this.unitManager.getUnit(unit.attackTargetId);
 
     // Target no longer exists or is dead -- clear state and bail.
@@ -162,6 +173,72 @@ export class CombatSystem implements System {
   }
 
   /**
+   * Processes an attack against an enemy building.
+   * Deals damage, and destroys the building when health reaches 0.
+   */
+  private processAttackBuilding(unit: import('../units/Unit').Unit, tick: number): void {
+    if (!this.gameState) return;
+    const building = this.gameState.getBuilding(unit.attackTargetId!);
+
+    if (!building || building.health <= 0) {
+      unit.attackTargetId = null;
+      unit.behaviorState = UnitBehaviorState.IDLE;
+      return;
+    }
+
+    const stats = UNIT_STATS[unit.type];
+    // Use building center for distance check (buildings are 2x2, except watchtower 1x1)
+    const bSize = building.type === BuildingType.WATCHTOWER ? 1 : 2;
+    const bCenter = { col: building.position.col + bSize / 2, row: building.position.row + bSize / 2 };
+    const distance = gridDistance(unit.position, bCenter);
+
+    if (distance <= stats.attackRange + 1) {
+      // In range -- deal damage.
+      building.health -= stats.attack;
+      unit.attackCooldown = ATTACK_COOLDOWN_TICKS;
+      unit.lastActionTick = tick;
+
+      if (building.health <= 0) {
+        building.health = 0;
+        this.eventBus.emit(GameEventType.BUILDING_DESTROYED, {
+          buildingId: building.id,
+          killedBy: unit.id,
+        });
+        this.gameState.removeBuilding(building.id);
+        unit.attackTargetId = null;
+        unit.behaviorState = UnitBehaviorState.IDLE;
+      }
+    } else if (!unit.path || unit.path.length === 0) {
+      // Chase the building
+      const path = findPath(unit.position, building.position, this.gameMap, unit.type);
+      if (path.length > 0) {
+        unit.setPath(path);
+      }
+    }
+  }
+
+  /**
+   * Find the nearest enemy building within vision range for a unit.
+   */
+  private findNearestEnemyBuilding(unit: import('../units/Unit').Unit): BuildingState | null {
+    if (!this.gameState) return null;
+    const stats = UNIT_STATS[unit.type];
+    let nearest: BuildingState | null = null;
+    let nearestDist = Infinity;
+
+    for (const building of this.gameState.getAllBuildings()) {
+      if (building.playerId === unit.playerId) continue;
+      if (building.health <= 0) continue;
+      const dist = gridDistance(unit.position, building.position);
+      if (dist <= stats.visionRange && dist < nearestDist) {
+        nearest = building;
+        nearestDist = dist;
+      }
+    }
+    return nearest;
+  }
+
+  /**
    * Scans for the nearest enemy unit within vision range and, if
    * found, sets the unit to attack it. Only called for idle combat
    * units (Soldier, Siege, Captain).
@@ -200,6 +277,14 @@ export class CombatSystem implements System {
 
     if (nearestEnemy !== null) {
       unit.attackTargetId = nearestEnemy.id;
+      unit.behaviorState = UnitBehaviorState.ATTACKING;
+      return;
+    }
+
+    // No enemy units found — check for enemy buildings
+    const building = this.findNearestEnemyBuilding(unit);
+    if (building) {
+      unit.attackTargetId = building.id;
       unit.behaviorState = UnitBehaviorState.ATTACKING;
     }
   }

@@ -17,11 +17,13 @@ import {
   UNIT_COSTS,
   BUILDING_STATS,
   BUILDING_COSTS,
+  PRODUCTION_BUILDINGS,
   PLAYER_COLORS,
   positionToLabel,
   GridPosition,
   BuildingState,
   UnitBehaviorState,
+  gridDistance,
 } from './shared/types';
 import { GameEngine, System } from './engine/GameEngine';
 import { GameMap } from './map/GameMap';
@@ -153,7 +155,7 @@ const communication = new Communication(eventBus);
 const strategicCommander = new StrategicCommander(
   LOCAL_PLAYER_ID, eventBus, unitManager, gameMap, fogOfWar, resourceManager, state,
 );
-const directiveExecutor = new DirectiveExecutor(unitManager, gameMap, fogOfWar, LOCAL_PLAYER_ID, eventBus);
+const directiveExecutor = new DirectiveExecutor(unitManager, gameMap, fogOfWar, LOCAL_PLAYER_ID, eventBus, state);
 
 // ---- Canvas & Rendering ----
 const gameCanvas = document.getElementById('game-canvas') as HTMLCanvasElement;
@@ -196,6 +198,75 @@ playerController.setGridToScreen((pos: GridPosition) =>
 // ============================================================
 
 // ---- Helper: find building at grid position ----
+/**
+ * Find a valid build location near a starting position by spiral-searching outward.
+ */
+function findBuildLocation(origin: GridPosition, buildingType: BuildingType): GridPosition | null {
+  const isSmall = buildingType === BuildingType.WATCHTOWER;
+  const footprint = isSmall ? 1 : 2;
+
+  // Spiral outward from origin, checking up to ~10 tile radius
+  for (let radius = 2; radius <= 12; radius++) {
+    for (let dr = -radius; dr <= radius; dr++) {
+      for (let dc = -radius; dc <= radius; dc++) {
+        if (Math.abs(dr) !== radius && Math.abs(dc) !== radius) continue; // ring only
+        const row = origin.row + dr;
+        const col = origin.col + dc;
+        if (row < 0 || col < 0) continue;
+        if (row + footprint > config.mapHeight || col + footprint > config.mapWidth) continue;
+
+        let valid = true;
+        for (let fr = 0; fr < footprint && valid; fr++) {
+          for (let fc = 0; fc < footprint && valid; fc++) {
+            const tile = gameMap.tiles[row + fr]?.[col + fc];
+            if (!tile || !tile.walkable) valid = false;
+          }
+        }
+        if (!valid) continue;
+
+        // Check overlap with existing buildings
+        for (const building of state.getAllBuildings()) {
+          const bFoot = building.type === BuildingType.WATCHTOWER ? 1 : 2;
+          for (let fr = 0; fr < footprint && valid; fr++) {
+            for (let fc = 0; fc < footprint && valid; fc++) {
+              for (let br = 0; br < bFoot; br++) {
+                for (let bc = 0; bc < bFoot; bc++) {
+                  if (
+                    row + fr === building.position.row + br &&
+                    col + fc === building.position.col + bc
+                  ) {
+                    valid = false;
+                  }
+                }
+              }
+            }
+          }
+        }
+        if (valid) return { row, col };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Find a walkable tile adjacent to a building footprint for the engineer to stand on.
+ */
+function findAdjacentWalkable(buildPos: GridPosition, footprint: number): GridPosition {
+  // Check tiles around the footprint perimeter
+  for (let dr = -1; dr <= footprint; dr++) {
+    for (let dc = -1; dc <= footprint; dc++) {
+      // Skip interior tiles
+      if (dr >= 0 && dr < footprint && dc >= 0 && dc < footprint) continue;
+      const r = buildPos.row + dr;
+      const c = buildPos.col + dc;
+      const tile = gameMap.tiles[r]?.[c];
+      if (tile && tile.walkable) return { row: r, col: c };
+    }
+  }
+  return buildPos;
+}
+
 function findBuildingAtPosition(gridPos: GridPosition): BuildingState | null {
   for (const building of state.getAllBuildings()) {
     const footprint = building.type === BuildingType.WATCHTOWER ? 1 : 2;
@@ -213,8 +284,11 @@ function findBuildingAtPosition(gridPos: GridPosition): BuildingState | null {
   return null;
 }
 
-// Handle selection resolution on mouseup
+// Handle selection resolution on mouseup (left-click only)
 gameCanvas.addEventListener('mouseup', (e) => {
+  // Ignore right-clicks — handled by contextmenu listener
+  if (e.button !== 0) return;
+
   // If in build placement mode, handle placement on left click
   if (playerController.buildPlacementMode && e.button === 0) {
     const rect = gameCanvas.getBoundingClientRect();
@@ -284,10 +358,14 @@ gameCanvas.addEventListener('mouseup', (e) => {
 
       if (engineers.length > 0) {
         const engineer = engineers[0]!;
-        const path = findPath(engineer.position, gridPos, gameMap, engineer.type);
+        const adjPos = findAdjacentWalkable(gridPos, footprint);
+        const path = findPath(engineer.position, adjPos, gameMap, engineer.type);
         if (path.length > 0) {
           engineer.setPath(path);
-          engineer.moveTo(gridPos);
+          engineer.moveTo(adjPos);
+          engineer.behaviorState = UnitBehaviorState.MOVING;
+          (engineer as any)._buildTargetId = buildingId;
+        } else {
           engineer.behaviorState = UnitBehaviorState.BUILDING;
         }
       }
@@ -327,6 +405,7 @@ gameCanvas.addEventListener('mouseup', (e) => {
     if (building && building.playerId === LOCAL_PLAYER_ID) {
       playerController.setSelectedBuildingId(building.id);
       unitManager.deselectAll(LOCAL_PLAYER_ID);
+      uiRenderer.showCommandBar();
     } else {
       playerController.selectedBuildingId = null;
       unitManager.deselectAll(LOCAL_PLAYER_ID);
@@ -353,6 +432,7 @@ gameCanvas.addEventListener('contextmenu', (e) => {
       unit.gatherTarget = null;
       unit.gatherProgress = 0;
       unit.attackTargetId = null;
+      unit.autoReturn = true;
       unit.addAuditLog(`Moving to ${positionToLabel(targetPos)}`, unit.id, 'action');
     }
   }
@@ -416,6 +496,70 @@ uiRenderer.onTrainUnit((buildingId, unitType) => {
 });
 
 // ---- Build menu handling (B key emits event) ----
+// Unit command buttons from sidebar panel
+uiRenderer.onUnitCommand((unitIds, command) => {
+  for (const uid of unitIds) {
+    const unit = unitManager.getUnit(uid);
+    if (!unit || !unit.isAlive()) continue;
+
+    switch (command) {
+      case 'stop':
+        unit.path = null;
+        unit.behaviorState = UnitBehaviorState.IDLE;
+        unit.currentCommand = null;
+        unit.autoReturn = false;
+        break;
+      case 'gather':
+        // Set the unit to gather mode — AI will find nearest resource
+        unit.setCommand('gather nearby resources');
+        eventBus.emit(GameEventType.UNIT_COMMAND, {
+          id: `cmd_panel_${Date.now()}`, tick: 0, playerId: LOCAL_PLAYER_ID,
+          type: 'voice', targetUnitIds: [uid], payload: { transcript: 'gather nearby resources' },
+        });
+        break;
+      case 'build':
+        // Trigger build menu for this engineer
+        eventBus.emit(GameEventType.BUILDING_PLACE_REQUESTED, { engineerIds: [uid] });
+        break;
+      case 'explore':
+        unit.setCommand('explore the map');
+        eventBus.emit(GameEventType.UNIT_COMMAND, {
+          id: `cmd_panel_${Date.now()}`, tick: 0, playerId: LOCAL_PLAYER_ID,
+          type: 'voice', targetUnitIds: [uid], payload: { transcript: 'explore the map' },
+        });
+        break;
+      case 'attack_move':
+        unit.setCommand('attack nearest enemy');
+        eventBus.emit(GameEventType.UNIT_COMMAND, {
+          id: `cmd_panel_${Date.now()}`, tick: 0, playerId: LOCAL_PLAYER_ID,
+          type: 'voice', targetUnitIds: [uid], payload: { transcript: 'attack nearest enemy' },
+        });
+        break;
+      case 'defend':
+        unit.setCommand('defend this position');
+        eventBus.emit(GameEventType.UNIT_COMMAND, {
+          id: `cmd_panel_${Date.now()}`, tick: 0, playerId: LOCAL_PLAYER_ID,
+          type: 'voice', targetUnitIds: [uid], payload: { transcript: 'defend this position' },
+        });
+        break;
+      case 'patrol':
+        unit.setCommand('patrol the area');
+        eventBus.emit(GameEventType.UNIT_COMMAND, {
+          id: `cmd_panel_${Date.now()}`, tick: 0, playerId: LOCAL_PLAYER_ID,
+          type: 'voice', targetUnitIds: [uid], payload: { transcript: 'patrol the area' },
+        });
+        break;
+      case 'siege_mode':
+        unit.setCommand('enter siege mode');
+        eventBus.emit(GameEventType.UNIT_COMMAND, {
+          id: `cmd_panel_${Date.now()}`, tick: 0, playerId: LOCAL_PLAYER_ID,
+          type: 'voice', targetUnitIds: [uid], payload: { transcript: 'enter siege mode' },
+        });
+        break;
+    }
+  }
+});
+
 eventBus.on(GameEventType.BUILDING_PLACE_REQUESTED, (data: any) => {
   const engineerIds = data.engineerIds as string[];
   // Check if any selected units are actually engineers
@@ -429,12 +573,80 @@ eventBus.on(GameEventType.BUILDING_PLACE_REQUESTED, (data: any) => {
 });
 
 uiRenderer.onBuildMenuSelect((buildingType) => {
-  const engineerIds = playerController.getSelectedUnitIds().filter((id) => {
-    const unit = unitManager.getUnit(id);
-    return unit && unit.type === UnitType.ENGINEER;
+  const engineers = playerController.getSelectedUnitIds()
+    .map((id) => unitManager.getUnit(id))
+    .filter((u) => u && u.type === UnitType.ENGINEER) as import('./units/Unit').Unit[];
+  if (engineers.length === 0) return;
+
+  if (!resourceManager.canAfford(LOCAL_PLAYER_ID, BUILDING_COSTS[buildingType])) return;
+
+  // Auto-find a suitable build location near the engineer
+  const engineer = engineers[0];
+  const buildPos = findBuildLocation(engineer.position, buildingType);
+  if (!buildPos) return;
+
+  const isSmall = buildingType === BuildingType.WATCHTOWER;
+  const footprint = isSmall ? 1 : 2;
+
+  resourceManager.spend(LOCAL_PLAYER_ID, BUILDING_COSTS[buildingType]);
+
+  const buildingId = `building_${buildingType}_${Date.now()}`;
+  const newBuilding: BuildingState = {
+    id: buildingId,
+    type: buildingType,
+    playerId: LOCAL_PLAYER_ID,
+    position: { col: buildPos.col, row: buildPos.row },
+    health: BUILDING_STATS[buildingType].maxHealth,
+    maxHealth: BUILDING_STATS[buildingType].maxHealth,
+    isConstructing: true,
+    constructionProgress: 0,
+    constructionTime: BUILDING_STATS[buildingType].constructionTime,
+    productionQueue: [],
+    productionProgress: 0,
+    productionTime: 0,
+    rallyPoint: { col: buildPos.col + footprint, row: buildPos.row + footprint },
+  };
+  state.addBuilding(newBuilding);
+
+  // Send engineer to build site — stay MOVING until arrival
+  const adjPos = findAdjacentWalkable(buildPos, footprint);
+  const path = findPath(engineer.position, adjPos, gameMap, engineer.type);
+  if (path.length > 0) {
+    engineer.setPath(path);
+    engineer.moveTo(adjPos);
+    engineer.behaviorState = UnitBehaviorState.MOVING;
+    // Store target building so we can transition to BUILDING on arrival
+    (engineer as any)._buildTargetId = buildingId;
+  } else {
+    // Already adjacent — start building immediately
+    engineer.behaviorState = UnitBehaviorState.BUILDING;
+  }
+
+  uiRenderer.addChatMessage({
+    unitId: engineer.id,
+    unitType: engineer.type,
+    content: `Building ${buildingType} at ${positionToLabel(buildPos)}`,
+    type: 'action',
+    gridLabel: positionToLabel(engineer.position),
   });
-  if (engineerIds.length > 0) {
-    playerController.enterBuildMode(buildingType, engineerIds);
+
+  uiRenderer.hideBuildMenu();
+});
+
+// When a building finishes, return nearby BUILDING-state engineers to IDLE
+eventBus.on(GameEventType.BUILDING_COMPLETED, (data: any) => {
+  const buildingId = data.buildingId as string;
+  const building = state.getBuilding(buildingId);
+  if (!building) return;
+  const footprint = building.type === BuildingType.WATCHTOWER ? 1 : 2;
+  for (const unit of unitManager.getUnitsForPlayer(building.playerId)) {
+    if (unit.type !== UnitType.ENGINEER || unit.behaviorState !== UnitBehaviorState.BUILDING) continue;
+    // Check adjacency
+    const dr = unit.position.row - building.position.row;
+    const dc = unit.position.col - building.position.col;
+    if (dr >= -1 && dr <= footprint && dc >= -1 && dc <= footprint) {
+      unit.behaviorState = UnitBehaviorState.IDLE;
+    }
   }
 });
 
@@ -535,6 +747,47 @@ async function handleUnitQuestion(question: string, targetUnits: any[]): Promise
   }
 }
 
+/**
+ * Parse a building production command like "build 5 soldiers and 1 messenger".
+ * Returns an array of { unitType, count } entries, or null if unparseable.
+ */
+function parseBuildingCommand(
+  text: string,
+  building: BuildingState,
+): { unitType: UnitType; count: number }[] | null {
+  const producible = new Set<UnitType>();
+  for (const [ut, bt] of Object.entries(PRODUCTION_BUILDINGS)) {
+    if (bt === building.type) producible.add(ut as UnitType);
+  }
+  if (producible.size === 0) return null;
+
+  const results: { unitType: UnitType; count: number }[] = [];
+  const lower = text.toLowerCase();
+
+  // Match patterns like "5 soldiers", "1 messenger", "a scout", "soldiers"
+  const pattern = /(\d+|an?)\s+(engineer|scout|messenger|spy|soldier|siege|captain)s?/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(lower)) !== null) {
+    const countStr = match[1];
+    const count = countStr === 'a' || countStr === 'an' ? 1 : parseInt(countStr, 10);
+    const typeName = match[2] as UnitType;
+    if (producible.has(typeName) && count > 0 && count <= 20) {
+      results.push({ unitType: typeName, count });
+    }
+  }
+
+  // If no pattern matched but text mentions a producible unit type, build 1
+  if (results.length === 0) {
+    for (const ut of producible) {
+      if (lower.includes(ut)) {
+        results.push({ unitType: ut, count: 1 });
+      }
+    }
+  }
+
+  return results.length > 0 ? results : null;
+}
+
 // Voice/text command handling
 eventBus.on(GameEventType.UNIT_COMMAND, (data: any) => {
   if (data.type === 'voice' && data.payload?.transcript) {
@@ -542,6 +795,36 @@ eventBus.on(GameEventType.UNIT_COMMAND, (data: any) => {
     const targetUnits = data.targetUnitIds
       .map((id: string) => unitManager.getUnit(id))
       .filter(Boolean);
+
+    // If a building is selected and no units targeted, route to building
+    if (targetUnits.length === 0 && playerController.selectedBuildingId) {
+      const building = state.getBuilding(playerController.selectedBuildingId);
+      if (building && !building.isConstructing) {
+        const orders = parseBuildingCommand(transcript, building);
+        if (orders) {
+          let queued = 0;
+          for (const order of orders) {
+            for (let i = 0; i < order.count; i++) {
+              const cost = UNIT_COSTS[order.unitType];
+              if (resourceManager.canAfford(LOCAL_PLAYER_ID, cost)) {
+                resourceManager.spend(LOCAL_PLAYER_ID, cost);
+                building.productionQueue.push(order.unitType);
+                queued++;
+              }
+            }
+          }
+          const summary = orders.map((o) => `${o.count} ${o.unitType}${o.count > 1 ? 's' : ''}`).join(', ');
+          uiRenderer.addChatMessage({
+            unitId: building.id,
+            unitType: UnitType.ENGINEER,
+            content: queued > 0 ? `Queued: ${summary}` : `Can't afford: ${summary}`,
+            type: queued > 0 ? 'action' : 'status',
+            gridLabel: positionToLabel(building.position),
+          });
+        }
+      }
+      return;
+    }
 
     if (targetUnits.length === 0) {
       console.warn('[Command] No selected units to command');
@@ -557,8 +840,12 @@ eventBus.on(GameEventType.UNIT_COMMAND, (data: any) => {
     }
 
     // Set command directly on all targeted units (bypass base range limit)
+    // Note: autoReturn is NOT set here — voice commands are managed by the
+    // directive system which handles lifecycle. autoReturn is only for
+    // simple right-click moves that bypass the commander entirely.
     for (const unit of targetUnits) {
       (unit as any).setCommand(transcript);
+      (unit as any).autoReturn = false;
       uiRenderer.addChatMessage({
         unitId: (unit as any).id,
         unitType: (unit as any).type,
@@ -627,9 +914,34 @@ const movementFogSystem: System = {
         if (movesPerTick >= 0.1 && tick % Math.max(1, Math.round(1 / movesPerTick)) === 0) {
           unit.advanceOnPath();
 
-          // If unit finished its path and was MOVING, go idle
+          // If unit finished its path and was MOVING
           if (!unit.path && unit.behaviorState === UnitBehaviorState.MOVING) {
-            unit.behaviorState = UnitBehaviorState.IDLE;
+            // Check if this engineer was heading to a build site
+            const buildTargetId = (unit as any)._buildTargetId as string | undefined;
+            if (buildTargetId && unit.type === UnitType.ENGINEER) {
+              unit.behaviorState = UnitBehaviorState.BUILDING;
+              delete (unit as any)._buildTargetId;
+            } else {
+              unit.behaviorState = UnitBehaviorState.IDLE;
+
+              // Return-to-base after command completion
+              // Only trigger when there is no active directive (i.e. right-click move).
+              // Voice-commanded units with directives let the DirectiveExecutor
+              // manage the full objective lifecycle before returning.
+              if (unit.autoReturn && unit.playerId === LOCAL_PLAYER_ID && unit.homeBase) {
+                const directive = strategicCommander.getDirective(unit.id);
+                const hasActiveDirective = directive && !directive.completed;
+                if (!hasActiveDirective) {
+                  const dist = gridDistance(unit.position, unit.homeBase);
+                  if (dist > 1) {
+                    unit.behaviorState = UnitBehaviorState.RETURNING;
+                    const returnPath = findPath(unit.position, unit.homeBase, gameMap, unit.type);
+                    if (returnPath.length > 0) unit.setPath(returnPath);
+                  }
+                  unit.autoReturn = false;
+                }
+              }
+            }
           }
         }
       }
@@ -663,8 +975,33 @@ const movementFogSystem: System = {
 engine.registerSystem('movementFog', movementFogSystem);
 engine.registerSystem('ai', new AISystem(unitManager, gameMap, agentController, communication, strategicCommander, directiveExecutor, LOCAL_PLAYER_ID));
 engine.registerSystem('resources', new ResourceSystem(unitManager, gameMap, resourceManager, LOCAL_PLAYER_ID));
-engine.registerSystem('combat', new CombatSystem(unitManager, gameMap, LOCAL_PLAYER_ID));
+engine.registerSystem('combat', new CombatSystem(unitManager, gameMap, LOCAL_PLAYER_ID, state));
 engine.registerSystem('buildings', new BuildingSystem(unitManager, resourceManager, state));
+
+// Win/Loss condition check
+let gameOver = false;
+const winLossSystem: System = {
+  init() {},
+  update(tick: number) {
+    if (gameOver || tick < 10) return;
+    // Check every 10 ticks to avoid overhead
+    if (tick % 10 !== 0) return;
+
+    const playerBase = state.getBuildingsForPlayer(LOCAL_PLAYER_ID).find(b => b.type === BuildingType.BASE);
+    const enemyBase = state.getBuildingsForPlayer(ENEMY_PLAYER_ID).find(b => b.type === BuildingType.BASE);
+
+    if (!enemyBase || enemyBase.health <= 0) {
+      gameOver = true;
+      uiRenderer.addChatMessage({ unitId: '', unitType: UnitType.ENGINEER, content: 'VICTORY! Enemy base destroyed!', type: 'status', gridLabel: '' });
+      engine.pause();
+    } else if (!playerBase || playerBase.health <= 0) {
+      gameOver = true;
+      uiRenderer.addChatMessage({ unitId: '', unitType: UnitType.ENGINEER, content: 'DEFEAT! Our base has been destroyed!', type: 'status', gridLabel: '' });
+      engine.pause();
+    }
+  },
+};
+engine.registerSystem('winLoss', winLossSystem);
 
 // ============================================================
 // Render Loop (runs every frame via engine.onFrame)
@@ -672,6 +1009,11 @@ engine.registerSystem('buildings', new BuildingSystem(unitManager, resourceManag
 
 /** Tracks which unit pairs are currently sharing vision (to avoid spamming chat). */
 const activeSharingPairs = new Set<string>();
+/** Permanent set: pairs that have already shown "Sharing map intel" chat message. */
+const sharedChatPairs = new Set<string>();
+/** Cap the total number of "Sharing map intel" messages shown to avoid chat spam. */
+const MAX_SHARING_CHAT_MESSAGES = 3;
+let sharingChatCount = 0;
 
 engine.onFrame = () => {
   // ---- Camera panning ----
@@ -767,22 +1109,61 @@ engine.onFrame = () => {
       const dr = a.position.row - b.position.row;
       const dc = a.position.col - b.position.col;
       if (dr * dr + dc * dc <= SHARE_RANGE_SQ) {
+        // Always track proximity so the pair isn't evicted from
+        // activeSharingPairs while units remain idle and close.
+        const pairKey = a.id < b.id ? `${a.id}:${b.id}` : `${b.id}:${a.id}`;
+        currentPairs.add(pairKey);
+
+        // Show speech bubbles for all pairs that have ever shared in this
+        // proximity session (stable — no flickering).
+        if (activeSharingPairs.has(pairKey)) {
+          sharingUnitIds.add(a.id);
+          sharingUnitIds.add(b.id);
+        }
+
+        // Check if the two units actually have divergent map knowledge
+        let hasDivergence = false;
+        for (const [key, tick] of b.visionHistory) {
+          const existing = a.visionHistory.get(key);
+          if (existing === undefined || tick > existing) {
+            hasDivergence = true;
+            break;
+          }
+        }
+        if (!hasDivergence) {
+          for (const [key, tick] of a.visionHistory) {
+            const existing = b.visionHistory.get(key);
+            if (existing === undefined || tick > existing) {
+              hasDivergence = true;
+              break;
+            }
+          }
+        }
+
+        if (!hasDivergence) continue;
+
+        // Mark as sharing (also covers the first frame before activeSharingPairs is set)
         sharingUnitIds.add(a.id);
         sharingUnitIds.add(b.id);
 
-        // Log to chat when a new sharing pair forms
-        const pairKey = a.id < b.id ? `${a.id}:${b.id}` : `${b.id}:${a.id}`;
-        currentPairs.add(pairKey);
+        // Log to chat once (ever) when sharing first occurs for this pair (capped)
+        if (!sharedChatPairs.has(pairKey)) {
+          sharedChatPairs.add(pairKey);
+          if (sharingChatCount < MAX_SHARING_CHAT_MESSAGES) {
+            sharingChatCount++;
+            const aLabel = positionToLabel(a.position);
+            const bLabel = positionToLabel(b.position);
+            uiRenderer.addChatMessage({
+              unitId: a.id,
+              unitType: a.type,
+              content: `Sharing map intel with ${b.type} @ ${bLabel}`,
+              type: 'communication',
+              gridLabel: aLabel,
+            });
+          }
+        }
         if (!activeSharingPairs.has(pairKey)) {
-          const aLabel = positionToLabel(a.position);
-          const bLabel = positionToLabel(b.position);
-          uiRenderer.addChatMessage({
-            unitId: a.id,
-            unitType: a.type,
-            content: `Sharing map intel with ${b.type} @ ${bLabel}`,
-            type: 'communication',
-            gridLabel: aLabel,
-          });
+          activeSharingPairs.add(pairKey);
         }
 
         // Merge vision histories — each unit learns what the other has seen
@@ -801,12 +1182,9 @@ engine.onFrame = () => {
       }
     }
   }
-  // Update active pairs — remove stale, add new
+  // Remove pairs that are no longer idle + close
   for (const key of activeSharingPairs) {
     if (!currentPairs.has(key)) activeSharingPairs.delete(key);
-  }
-  for (const key of currentPairs) {
-    activeSharingPairs.add(key);
   }
 
   const renderState: RenderState = {

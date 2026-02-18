@@ -4,7 +4,9 @@ import { ResourceManager } from '../resources/ResourceManager';
 import { GameState } from '../engine/GameState';
 import {
   BuildingState,
+  BuildingType,
   UnitType,
+  UnitBehaviorState,
   GameEventType,
   PRODUCTION_TIME,
   BUILDING_STATS,
@@ -82,11 +84,17 @@ export class BuildingSystem implements System {
       return;
     }
 
+    // Only advance construction if an engineer is adjacent and in BUILDING state
+    if (!this.hasEngineerNearby(building)) {
+      return;
+    }
+
     building.constructionProgress += 1 / building.constructionTime;
 
     if (building.constructionProgress >= 1.0) {
       building.isConstructing = false;
       building.constructionProgress = 1.0;
+      building.health = building.maxHealth;
 
       this.eventBus.emit(GameEventType.BUILDING_COMPLETED, {
         buildingId: building.id,
@@ -195,5 +203,33 @@ export class BuildingSystem implements System {
 
     // No walkable neighbour found -- fall back to the building position.
     return { row: building.position.row, col: building.position.col };
+  }
+
+  /**
+   * Check if an engineer in BUILDING state is adjacent to the building.
+   */
+  private hasEngineerNearby(building: BuildingState): boolean {
+    const footprint = building.type === BuildingType.WATCHTOWER ? 1 : 2;
+    for (const unit of this.unitManager.getUnitsForPlayer(building.playerId)) {
+      if (
+        unit.type !== UnitType.ENGINEER ||
+        unit.behaviorState !== UnitBehaviorState.BUILDING ||
+        !unit.isAlive()
+      ) {
+        continue;
+      }
+      // Check if engineer is adjacent to any tile in the building footprint
+      for (let dr = -1; dr <= footprint; dr++) {
+        for (let dc = -1; dc <= footprint; dc++) {
+          if (
+            unit.position.row === building.position.row + dr &&
+            unit.position.col === building.position.col + dc
+          ) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
   }
 }
