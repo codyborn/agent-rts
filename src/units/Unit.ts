@@ -59,6 +59,12 @@ export class Unit {
   // AI
   public lastThought: string | null;
 
+  // Rendering
+  public facingDirection: 'left' | 'right' = 'right';
+
+  // Per-unit vision tracking (for heat map overlay)
+  public visionHistory: Map<string, number> = new Map();
+
   constructor(
     id: string,
     type: UnitType,
@@ -176,6 +182,12 @@ export class Unit {
     }
 
     const next = this.path.shift()!;
+    // Update facing direction based on horizontal movement
+    if (next.col > this.position.col) {
+      this.facingDirection = 'right';
+    } else if (next.col < this.position.col) {
+      this.facingDirection = 'left';
+    }
     this.position = { col: next.col, row: next.row };
 
     if (this.path.length === 0) {
@@ -255,6 +267,7 @@ export class Unit {
       attackTargetId: this.attackTargetId,
       attackCooldown: this.attackCooldown,
       lastThought: this.lastThought,
+      facingDirection: this.facingDirection,
     };
   }
 }

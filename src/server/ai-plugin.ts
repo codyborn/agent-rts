@@ -300,6 +300,79 @@ export function aiPlugin(): Plugin {
           res.end(JSON.stringify({ error: errMsg }));
         }
       });
+
+      // ---- Unit Q&A endpoint ----
+      server.middlewares.use('/api/ask', async (req, res) => {
+        if (req.method !== 'POST') {
+          res.statusCode = 405;
+          res.end(JSON.stringify({ error: 'Method not allowed' }));
+          return;
+        }
+
+        if (!client) {
+          res.statusCode = 503;
+          res.end(JSON.stringify({ error: 'LLM not configured' }));
+          return;
+        }
+
+        if (Date.now() < rateLimitUntil) {
+          const remaining = Math.round((rateLimitUntil - Date.now()) / 1000);
+          res.statusCode = 429;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: `Rate limited, ${remaining}s remaining` }));
+          return;
+        }
+
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) {
+          chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+        }
+        const body = JSON.parse(Buffer.concat(chunks).toString());
+        const { perception, unitType, question } = body as {
+          perception: string;
+          unitType: string;
+          question: string;
+        };
+
+        const personality =
+          UNIT_PERSONALITIES[unitType] ?? UNIT_PERSONALITIES.soldier;
+
+        const systemPrompt = `You are a ${unitType} in an RTS game. Respond to your commander's question. Stay in character. Be brief (1-3 sentences).\n\nYour role: ${personality}`;
+
+        try {
+          const response = await client.messages.create({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 150,
+            system: systemPrompt,
+            messages: [
+              { role: 'user', content: `Current situation:\n${perception}\n\nCommander asks: ${question}` },
+            ],
+          });
+
+          const textBlock = response.content.find(
+            (b): b is Anthropic.ContentBlock & { type: 'text' } =>
+              b.type === 'text',
+          );
+
+          const answer = textBlock?.text || 'Unable to respond at this time, Commander.';
+          console.log(`[ai-plugin] ${unitType} Q&A: "${question}" -> "${answer}"`);
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ answer }));
+        } catch (err: any) {
+          const errMsg = err?.message || String(err);
+          if (err?.status === 429) {
+            const retryAfter = parseInt(err?.headers?.get?.('retry-after') || '60', 10);
+            rateLimitUntil = Date.now() + retryAfter * 1000;
+            console.warn(`[ai-plugin] Q&A rate limited — backing off ${retryAfter}s`);
+            res.statusCode = 429;
+          } else {
+            console.error('[ai-plugin] Q&A API error:', errMsg);
+            res.statusCode = 502;
+          }
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: errMsg }));
+        }
+      });
     },
   };
 }

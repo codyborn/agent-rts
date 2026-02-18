@@ -14,7 +14,9 @@ import {
   ResourceType,
   FogState,
   UNIT_STATS,
+  UNIT_COSTS,
   BUILDING_STATS,
+  BUILDING_COSTS,
   PLAYER_COLORS,
   positionToLabel,
   GridPosition,
@@ -31,6 +33,8 @@ import { Camera } from './rendering/Camera';
 import { Renderer, RenderState } from './rendering/Renderer';
 import { MinimapRenderer } from './rendering/MinimapRenderer';
 import { UIRenderer } from './rendering/UIRenderer';
+import { SpriteManager } from './rendering/SpriteManager';
+import { classifyInput } from './player/InputClassifier';
 import { PlayerController } from './player/PlayerController';
 import { AgentController } from './ai/AgentController';
 import { Communication } from './ai/Communication';
@@ -169,7 +173,10 @@ const worldHeight = config.mapHeight * config.tileSize;
 const camera = new Camera(gameCanvas.width, gameCanvas.height, worldWidth, worldHeight);
 camera.centerOn(basePosition, config.tileSize);
 
-const renderer = new Renderer(gameCanvas, camera);
+const spriteManager = new SpriteManager();
+spriteManager.init();
+
+const renderer = new Renderer(gameCanvas, camera, spriteManager);
 const minimapRenderer = new MinimapRenderer(minimapCanvas);
 const uiRenderer = new UIRenderer();
 
@@ -188,8 +195,109 @@ playerController.setGridToScreen((pos: GridPosition) =>
 // Event Wiring
 // ============================================================
 
+// ---- Helper: find building at grid position ----
+function findBuildingAtPosition(gridPos: GridPosition): BuildingState | null {
+  for (const building of state.getAllBuildings()) {
+    const footprint = building.type === BuildingType.WATCHTOWER ? 1 : 2;
+    for (let dr = 0; dr < footprint; dr++) {
+      for (let dc = 0; dc < footprint; dc++) {
+        if (
+          building.position.row + dr === gridPos.row &&
+          building.position.col + dc === gridPos.col
+        ) {
+          return building;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 // Handle selection resolution on mouseup
-gameCanvas.addEventListener('mouseup', () => {
+gameCanvas.addEventListener('mouseup', (e) => {
+  // If in build placement mode, handle placement on left click
+  if (playerController.buildPlacementMode && e.button === 0) {
+    const rect = gameCanvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const gridPos = camera.screenToGrid(sx, sy, config.tileSize);
+    const buildType = playerController.buildPlacementMode.buildingType;
+    const isSmall = buildType === BuildingType.WATCHTOWER;
+    const footprint = isSmall ? 1 : 2;
+
+    // Validate placement
+    let valid = true;
+    for (let dr = 0; dr < footprint && valid; dr++) {
+      for (let dc = 0; dc < footprint && valid; dc++) {
+        const r = gridPos.row + dr;
+        const c = gridPos.col + dc;
+        const tile = gameMap.tiles[r]?.[c];
+        if (!tile || !tile.walkable) valid = false;
+      }
+    }
+    // Check overlap
+    if (valid) {
+      for (const building of state.getAllBuildings()) {
+        const bFoot = building.type === BuildingType.WATCHTOWER ? 1 : 2;
+        for (let dr = 0; dr < footprint && valid; dr++) {
+          for (let dc = 0; dc < footprint && valid; dc++) {
+            for (let br = 0; br < bFoot; br++) {
+              for (let bc = 0; bc < bFoot; bc++) {
+                if (
+                  gridPos.row + dr === building.position.row + br &&
+                  gridPos.col + dc === building.position.col + bc
+                ) {
+                  valid = false;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (valid && resourceManager.canAfford(LOCAL_PLAYER_ID, BUILDING_COSTS[buildType])) {
+      resourceManager.spend(LOCAL_PLAYER_ID, BUILDING_COSTS[buildType]);
+
+      const buildingId = `building_${buildType}_${Date.now()}`;
+      const newBuilding: BuildingState = {
+        id: buildingId,
+        type: buildType,
+        playerId: LOCAL_PLAYER_ID,
+        position: { col: gridPos.col, row: gridPos.row },
+        health: BUILDING_STATS[buildType].maxHealth,
+        maxHealth: BUILDING_STATS[buildType].maxHealth,
+        isConstructing: true,
+        constructionProgress: 0,
+        constructionTime: BUILDING_STATS[buildType].constructionTime,
+        productionQueue: [],
+        productionProgress: 0,
+        productionTime: 0,
+        rallyPoint: { col: gridPos.col + footprint, row: gridPos.row + footprint },
+      };
+      state.addBuilding(newBuilding);
+
+      // Pathfind nearest engineer to the building site
+      const engineers = playerController.buildPlacementMode.engineerIds
+        .map((id) => unitManager.getUnit(id))
+        .filter((u) => u && u.type === UnitType.ENGINEER);
+
+      if (engineers.length > 0) {
+        const engineer = engineers[0]!;
+        const path = findPath(engineer.position, gridPos, gameMap, engineer.type);
+        if (path.length > 0) {
+          engineer.setPath(path);
+          engineer.moveTo(gridPos);
+          engineer.behaviorState = UnitBehaviorState.BUILDING;
+        }
+      }
+
+      playerController.cancelBuildMode();
+      uiRenderer.hideBuildMenu();
+    }
+    return;
+  }
+
   const allUnitStates = Array.from(unitManager.getUnitStates().values());
   const selectedIds = playerController.selection.resolveSelection(
     allUnitStates,
@@ -200,8 +308,8 @@ gameCanvas.addEventListener('mouseup', () => {
   );
 
   if (selectedIds.length > 0) {
+    playerController.selectedBuildingId = null;
     if (playerController.selection.isShiftHeld) {
-      // Additive selection
       const current = new Set(playerController.getSelectedUnitIds());
       for (const id of selectedIds) current.add(id);
       unitManager.selectUnits([...current]);
@@ -209,7 +317,20 @@ gameCanvas.addEventListener('mouseup', () => {
       unitManager.selectUnits(selectedIds);
     }
   } else if (!playerController.selection.isShiftHeld) {
-    unitManager.deselectAll(LOCAL_PLAYER_ID);
+    // Check if clicking on a building
+    const rect = gameCanvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const gridPos = camera.screenToGrid(sx, sy, config.tileSize);
+    const building = findBuildingAtPosition(gridPos);
+
+    if (building && building.playerId === LOCAL_PLAYER_ID) {
+      playerController.setSelectedBuildingId(building.id);
+      unitManager.deselectAll(LOCAL_PLAYER_ID);
+    } else {
+      playerController.selectedBuildingId = null;
+      unitManager.deselectAll(LOCAL_PLAYER_ID);
+    }
   }
 });
 
@@ -285,6 +406,38 @@ uiRenderer.onChatMessageClick((unitId) => {
   }
 });
 
+// ---- Unit training from building panel ----
+uiRenderer.onTrainUnit((buildingId, unitType) => {
+  const building = state.getBuilding(buildingId);
+  if (!building || building.isConstructing) return;
+  if (!resourceManager.canAfford(LOCAL_PLAYER_ID, UNIT_COSTS[unitType])) return;
+  resourceManager.spend(LOCAL_PLAYER_ID, UNIT_COSTS[unitType]);
+  building.productionQueue.push(unitType);
+});
+
+// ---- Build menu handling (B key emits event) ----
+eventBus.on(GameEventType.BUILDING_PLACE_REQUESTED, (data: any) => {
+  const engineerIds = data.engineerIds as string[];
+  // Check if any selected units are actually engineers
+  const hasEngineers = engineerIds.some((id) => {
+    const unit = unitManager.getUnit(id);
+    return unit && unit.type === UnitType.ENGINEER;
+  });
+  if (hasEngineers) {
+    uiRenderer.showBuildMenu();
+  }
+});
+
+uiRenderer.onBuildMenuSelect((buildingType) => {
+  const engineerIds = playerController.getSelectedUnitIds().filter((id) => {
+    const unit = unitManager.getUnit(id);
+    return unit && unit.type === UnitType.ENGINEER;
+  });
+  if (engineerIds.length > 0) {
+    playerController.enterBuildMode(buildingType, engineerIds);
+  }
+});
+
 // Command bar: show when units are selected, hide when deselected
 eventBus.on(GameEventType.SELECTION_CHANGED, (data: any) => {
   const ids = data.unitIds as string[];
@@ -322,6 +475,66 @@ eventBus.on(GameEventType.PLAYER_COMMAND, () => {
   uiRenderer.setMicRecording(false);
 });
 
+// ---- Unit Q&A handler ----
+async function handleUnitQuestion(question: string, targetUnits: any[]): Promise<void> {
+  for (const unit of targetUnits) {
+    uiRenderer.addChatMessage({
+      unitId: unit.id,
+      unitType: unit.type,
+      content: `Commander asks: "${question}"`,
+      type: 'command',
+      gridLabel: unit.getGridLabel(),
+    });
+
+    // Build lightweight perception
+    const perception = [
+      `Position: ${positionToLabel(unit.position)}`,
+      `Health: ${unit.health}/${unit.getStats().maxHealth}`,
+      `Behavior: ${unit.behaviorState}`,
+      unit.currentCommand ? `Current order: ${unit.currentCommand}` : 'No standing orders',
+    ].join('\n');
+
+    try {
+      const res = await fetch('/api/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          perception,
+          unitType: unit.type,
+          question,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        uiRenderer.addChatMessage({
+          unitId: unit.id,
+          unitType: unit.type,
+          content: data.answer || 'Unable to respond at this time, Commander.',
+          type: 'communication',
+          gridLabel: unit.getGridLabel(),
+        });
+      } else {
+        uiRenderer.addChatMessage({
+          unitId: unit.id,
+          unitType: unit.type,
+          content: 'Unable to respond at this time, Commander.',
+          type: 'communication',
+          gridLabel: unit.getGridLabel(),
+        });
+      }
+    } catch {
+      uiRenderer.addChatMessage({
+        unitId: unit.id,
+        unitType: unit.type,
+        content: 'Unable to respond at this time, Commander.',
+        type: 'communication',
+        gridLabel: unit.getGridLabel(),
+      });
+    }
+  }
+}
+
 // Voice/text command handling
 eventBus.on(GameEventType.UNIT_COMMAND, (data: any) => {
   if (data.type === 'voice' && data.payload?.transcript) {
@@ -332,6 +545,14 @@ eventBus.on(GameEventType.UNIT_COMMAND, (data: any) => {
 
     if (targetUnits.length === 0) {
       console.warn('[Command] No selected units to command');
+      return;
+    }
+
+    // Classify input as command or question
+    const intent = classifyInput(transcript);
+
+    if (intent === 'question') {
+      handleUnitQuestion(transcript, targetUnits);
       return;
     }
 
@@ -449,6 +670,9 @@ engine.registerSystem('buildings', new BuildingSystem(unitManager, resourceManag
 // Render Loop (runs every frame via engine.onFrame)
 // ============================================================
 
+/** Tracks which unit pairs are currently sharing vision (to avoid spamming chat). */
+const activeSharingPairs = new Set<string>();
+
 engine.onFrame = () => {
   // ---- Camera panning ----
   const panSpeed = 5;
@@ -477,6 +701,114 @@ engine.onFrame = () => {
     unitManager.getSelectedUnits(LOCAL_PLAYER_ID).map((u) => u.id)
   );
 
+  // ---- Build placement ghost ----
+  let buildPlacementMode: RenderState['buildPlacementMode'] = null;
+  if (playerController.buildPlacementMode) {
+    const gridPos = camera.screenToGrid(mouseX, mouseY, config.tileSize);
+    buildPlacementMode = {
+      buildingType: playerController.buildPlacementMode.buildingType,
+      mouseGridPos: gridPos,
+    };
+  }
+
+  // ---- Heat map data ----
+  // Compute merged vision history from selected units (minimap always shows when units selected)
+  let minimapHeatMapData: Map<string, number> | null = null;
+  if (selectedIds.size > 0) {
+    minimapHeatMapData = new Map();
+    for (const uid of selectedIds) {
+      const unit = unitManager.getUnit(uid);
+      if (unit) {
+        for (const [key, tick] of unit.visionHistory) {
+          const existing = minimapHeatMapData.get(key);
+          if (existing === undefined || tick > existing) {
+            minimapHeatMapData.set(key, tick);
+          }
+        }
+      }
+    }
+  }
+  // Main canvas heat map only shows when toggled with H key
+  const heatMapData = playerController.heatMapEnabled ? minimapHeatMapData : null;
+
+  // ---- Vision history tracking ----
+  const currentTick = engine.getCurrentTick();
+  const localUnits = unitManager.getUnitsForPlayer(LOCAL_PLAYER_ID);
+  for (const unit of localUnits) {
+    const vRange = unit.getStats().visionRange;
+    const vRangeSq = vRange * vRange;
+    const minRow = Math.max(0, unit.position.row - vRange);
+    const maxRow = Math.min(config.mapHeight - 1, unit.position.row + vRange);
+    const minCol = Math.max(0, unit.position.col - vRange);
+    const maxCol = Math.min(config.mapWidth - 1, unit.position.col + vRange);
+    for (let r = minRow; r <= maxRow; r++) {
+      for (let c = minCol; c <= maxCol; c++) {
+        const dr = r - unit.position.row;
+        const dc = c - unit.position.col;
+        if (dr * dr + dc * dc <= vRangeSq) {
+          unit.visionHistory.set(`${c},${r}`, currentTick);
+        }
+      }
+    }
+  }
+
+  // ---- Idle proximity vision sharing ----
+  // When two idle units are within 2 tiles of each other, they share map history.
+  const SHARE_RANGE_SQ = 2 * 2;
+  const sharingUnitIds = new Set<string>();
+  const currentPairs = new Set<string>();
+  const idleUnits = localUnits.filter(
+    (u) => u.isAlive() && u.behaviorState === UnitBehaviorState.IDLE,
+  );
+  for (let i = 0; i < idleUnits.length; i++) {
+    for (let j = i + 1; j < idleUnits.length; j++) {
+      const a = idleUnits[i];
+      const b = idleUnits[j];
+      const dr = a.position.row - b.position.row;
+      const dc = a.position.col - b.position.col;
+      if (dr * dr + dc * dc <= SHARE_RANGE_SQ) {
+        sharingUnitIds.add(a.id);
+        sharingUnitIds.add(b.id);
+
+        // Log to chat when a new sharing pair forms
+        const pairKey = a.id < b.id ? `${a.id}:${b.id}` : `${b.id}:${a.id}`;
+        currentPairs.add(pairKey);
+        if (!activeSharingPairs.has(pairKey)) {
+          const aLabel = positionToLabel(a.position);
+          const bLabel = positionToLabel(b.position);
+          uiRenderer.addChatMessage({
+            unitId: a.id,
+            unitType: a.type,
+            content: `Sharing map intel with ${b.type} @ ${bLabel}`,
+            type: 'communication',
+            gridLabel: aLabel,
+          });
+        }
+
+        // Merge vision histories — each unit learns what the other has seen
+        for (const [key, tick] of b.visionHistory) {
+          const existing = a.visionHistory.get(key);
+          if (existing === undefined || tick > existing) {
+            a.visionHistory.set(key, tick);
+          }
+        }
+        for (const [key, tick] of a.visionHistory) {
+          const existing = b.visionHistory.get(key);
+          if (existing === undefined || tick > existing) {
+            b.visionHistory.set(key, tick);
+          }
+        }
+      }
+    }
+  }
+  // Update active pairs — remove stale, add new
+  for (const key of activeSharingPairs) {
+    if (!currentPairs.has(key)) activeSharingPairs.delete(key);
+  }
+  for (const key of currentPairs) {
+    activeSharingPairs.add(key);
+  }
+
   const renderState: RenderState = {
     tiles: gameMap.tiles,
     units: unitStates,
@@ -486,6 +818,10 @@ engine.onFrame = () => {
     selectedUnitIds: selectedIds,
     localPlayerId: LOCAL_PLAYER_ID,
     selectionRect: playerController.selection.getSelectionRect(),
+    currentTick,
+    buildPlacementMode,
+    heatMapData,
+    sharingUnitIds,
   };
 
   // ---- Render ----
@@ -499,18 +835,29 @@ engine.onFrame = () => {
     config,
     cameraViewport: camera.getViewportRect(),
     localPlayerId: LOCAL_PLAYER_ID,
+    heatMapData: minimapHeatMapData,
+    currentTick,
   });
 
   // ---- UI Updates ----
   const resources = resourceManager.getResources(LOCAL_PLAYER_ID);
   uiRenderer.updateResources(resources.minerals, resources.energy);
-  uiRenderer.updateTick(engine.getCurrentTick());
+  uiRenderer.updateTick(currentTick);
   uiRenderer.updateHotkeys(playerController.hotkeys.getGroups());
 
-  const selectedUnits = unitManager
-    .getSelectedUnits(LOCAL_PLAYER_ID)
-    .map((u) => u.toState());
-  uiRenderer.updateUnitInfo(selectedUnits);
+  // ---- UI: Building or Unit info ----
+  if (playerController.selectedBuildingId) {
+    const building = state.getBuilding(playerController.selectedBuildingId);
+    if (building) {
+      const res = resourceManager.getResources(LOCAL_PLAYER_ID);
+      uiRenderer.updateBuildingInfo(building, res);
+    }
+  } else {
+    const selectedUnits = unitManager
+      .getSelectedUnits(LOCAL_PLAYER_ID)
+      .map((u) => u.toState());
+    uiRenderer.updateUnitInfo(selectedUnits);
+  }
 };
 
 // ============================================================

@@ -156,6 +156,10 @@ export enum GameEventType {
   RESOURCE_NEARBY = 'resource_nearby',
   ENEMY_NEARBY = 'enemy_nearby',
 
+  // Building placement / training
+  BUILDING_PLACE_REQUESTED = 'building_place_requested',
+  TRAIN_UNIT_REQUESTED = 'train_unit_requested',
+
   // Selection / Input
   SELECTION_CHANGED = 'selection_changed',
   HOTKEY_ASSIGNED = 'hotkey_assigned',
@@ -220,6 +224,9 @@ export interface UnitState {
 
   // AI
   lastThought: string | null;
+
+  // Rendering
+  facingDirection: 'left' | 'right';
 }
 
 export interface BuildingState {

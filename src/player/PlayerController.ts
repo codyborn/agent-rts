@@ -1,4 +1,4 @@
-import { GameEventType, GameCommand, GridPosition, UnitType } from '../shared/types';
+import { GameEventType, GameCommand, GridPosition, UnitType, BuildingType } from '../shared/types';
 import { EventBus } from '../engine/EventBus';
 import { Selection } from './Selection';
 import { Hotkeys } from './Hotkeys';
@@ -25,6 +25,13 @@ export class PlayerController {
 
   private readonly eventBus: EventBus;
 
+  // ---- Building selection & build mode ----
+  public selectedBuildingId: string | null = null;
+  public buildPlacementMode: { buildingType: BuildingType; engineerIds: string[] } | null = null;
+
+  // ---- Heat map toggle ----
+  public heatMapEnabled: boolean = false;
+
   // Bound references for cleanup
   private readonly onKeyDown: (e: KeyboardEvent) => void;
   private readonly unsubscribeSelectionChanged: () => void;
@@ -45,6 +52,10 @@ export class PlayerController {
       (data) => {
         this.selectedUnitIds = [...data.unitIds];
         this.hotkeys.setCurrentSelection(this.selectedUnitIds);
+        // Clear building selection when units are selected
+        if (this.selectedUnitIds.length > 0) {
+          this.selectedBuildingId = null;
+        }
       }
     );
 
@@ -76,10 +87,35 @@ export class PlayerController {
 
     switch (e.key) {
       case 'Escape':
-        // Deselect all units
-        this.selectedUnitIds = [];
-        this.hotkeys.setCurrentSelection([]);
-        this.eventBus.emit(GameEventType.SELECTION_CHANGED, { unitIds: [] });
+        if (this.buildPlacementMode) {
+          // Cancel build placement mode first
+          this.cancelBuildMode();
+        } else {
+          // Deselect all units and buildings
+          this.selectedUnitIds = [];
+          this.selectedBuildingId = null;
+          this.heatMapEnabled = false;
+          this.hotkeys.setCurrentSelection([]);
+          this.eventBus.emit(GameEventType.SELECTION_CHANGED, { unitIds: [] });
+        }
+        break;
+
+      case 'b':
+      case 'B':
+        // Enter build mode if engineers are selected
+        if (this.selectedUnitIds.length > 0 && !e.ctrlKey && !e.metaKey) {
+          this.eventBus.emit(GameEventType.BUILDING_PLACE_REQUESTED, {
+            engineerIds: [...this.selectedUnitIds],
+          });
+        }
+        break;
+
+      case 'h':
+      case 'H':
+        // Toggle heat map overlay
+        if (this.selectedUnitIds.length > 0 && !e.ctrlKey && !e.metaKey) {
+          this.heatMapEnabled = !this.heatMapEnabled;
+        }
         break;
 
       case 's':
@@ -88,7 +124,7 @@ export class PlayerController {
         if (this.selectedUnitIds.length > 0 && !e.ctrlKey && !e.metaKey) {
           const stopCommand: GameCommand = {
             id: `cmd_${this.commandIdCounter++}`,
-            tick: 0, // will be set by command queue
+            tick: 0,
             playerId: this.playerId,
             type: 'stop',
             targetUnitIds: [...this.selectedUnitIds],
@@ -102,17 +138,10 @@ export class PlayerController {
 
   // ---- Public methods ----
 
-  /**
-   * Process a voice transcript and create a GameCommand from it.
-   * Emits UNIT_COMMAND with the generated command.
-   *
-   * @param transcript - Raw speech-to-text transcript
-   * @returns The generated GameCommand
-   */
   processVoiceCommand(transcript: string): GameCommand {
     const command: GameCommand = {
       id: `cmd_${this.commandIdCounter++}`,
-      tick: 0, // will be set by command queue
+      tick: 0,
       playerId: this.playerId,
       type: 'voice',
       targetUnitIds: [...this.selectedUnitIds],
@@ -123,16 +152,10 @@ export class PlayerController {
     return command;
   }
 
-  /**
-   * Get the currently selected unit IDs.
-   */
   getSelectedUnitIds(): string[] {
     return [...this.selectedUnitIds];
   }
 
-  /**
-   * Programmatically set the selected unit IDs and sync with subsystems.
-   */
   setSelectedUnitIds(ids: string[]): void {
     this.selectedUnitIds = [...ids];
     this.hotkeys.setCurrentSelection(this.selectedUnitIds);
@@ -141,40 +164,40 @@ export class PlayerController {
     });
   }
 
-  /**
-   * Get the screen-to-grid conversion function (set externally since
-   * it depends on the camera state).
-   */
+  setSelectedBuildingId(id: string | null): void {
+    this.selectedBuildingId = id;
+    if (id) {
+      // Clear unit selection when selecting a building
+      this.selectedUnitIds = [];
+      this.hotkeys.setCurrentSelection([]);
+      this.eventBus.emit(GameEventType.SELECTION_CHANGED, { unitIds: [] });
+    }
+  }
+
+  enterBuildMode(type: BuildingType, engineerIds: string[]): void {
+    this.buildPlacementMode = { buildingType: type, engineerIds };
+  }
+
+  cancelBuildMode(): void {
+    this.buildPlacementMode = null;
+  }
+
   getScreenToGrid(): ((x: number, y: number) => GridPosition) | null {
     return this.screenToGridFn;
   }
 
-  /**
-   * Set the screen-to-grid conversion function. This is called by the
-   * renderer or camera system to keep the Selection system in sync.
-   */
   setScreenToGrid(fn: (x: number, y: number) => GridPosition): void {
     this.screenToGridFn = fn;
   }
 
-  /**
-   * Set the grid-to-screen conversion function. Used by the Selection
-   * system to map unit positions back to screen coordinates for hit-testing.
-   */
   setGridToScreen(fn: (pos: GridPosition) => { x: number; y: number }): void {
     this.gridToScreenFn = fn;
   }
 
-  /**
-   * Retrieve the grid-to-screen conversion function.
-   */
   getGridToScreen(): ((pos: GridPosition) => { x: number; y: number }) | null {
     return this.gridToScreenFn;
   }
 
-  /**
-   * Clean up all subsystems and event listeners.
-   */
   destroy(): void {
     this.selection.destroy();
     this.hotkeys.destroy();

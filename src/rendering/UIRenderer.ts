@@ -5,18 +5,20 @@
 import {
   UnitState,
   UnitType,
+  BuildingType,
+  BuildingState,
+  ResourceType,
   AuditLogEntry,
   UNIT_STATS,
+  UNIT_COSTS,
+  BUILDING_COSTS,
+  PRODUCTION_BUILDINGS,
   positionToLabel,
   UNIT_ICONS,
 } from '../shared/types';
 
 /**
  * Updates HTML UI elements in the sidebar and overlay bars.
- *
- * Manages the resource bar, unit info panel, chat/audit log,
- * hotkey bar, and voice indicator -- all driven by DOM manipulation
- * rather than canvas rendering.
  */
 export class UIRenderer {
   // Cached DOM element references
@@ -36,6 +38,12 @@ export class UIRenderer {
   /** Optional callback invoked when a chat message is clicked */
   private chatClickCallback: ((unitId: string) => void) | null = null;
 
+  /** Callback for training units from building panel */
+  private trainUnitCallback: ((buildingId: string, unitType: UnitType) => void) | null = null;
+
+  /** Callback for build menu button clicks */
+  private buildMenuCallback: ((buildingType: BuildingType) => void) | null = null;
+
   constructor() {
     this.mineralsEl = document.getElementById('minerals-count');
     this.energyEl = document.getElementById('energy-count');
@@ -52,9 +60,6 @@ export class UIRenderer {
   // Resource Bar
   // ----------------------------------------------------------
 
-  /**
-   * Update the mineral and energy counters in the resource bar.
-   */
   updateResources(minerals: number, energy: number): void {
     if (this.mineralsEl) {
       this.mineralsEl.textContent = String(minerals);
@@ -68,9 +73,6 @@ export class UIRenderer {
   // Tick Display
   // ----------------------------------------------------------
 
-  /**
-   * Update the current tick counter.
-   */
   updateTick(tick: number): void {
     if (this.tickEl) {
       this.tickEl.textContent = `Tick: ${tick}`;
@@ -81,13 +83,6 @@ export class UIRenderer {
   // Unit Info Panel
   // ----------------------------------------------------------
 
-  /**
-   * Update the unit info panel in the sidebar.
-   *
-   * - No units: shows "No unit selected"
-   * - One unit: shows detailed stats (health, energy, command, afflictions)
-   * - Multiple units: shows a summary with type breakdown
-   */
   updateUnitInfo(units: UnitState[]): void {
     if (!this.unitInfoEl) return;
 
@@ -105,9 +100,6 @@ export class UIRenderer {
     this.renderMultiUnitInfo(units);
   }
 
-  /**
-   * Render detailed info for a single selected unit.
-   */
   private renderSingleUnitInfo(unit: UnitState): void {
     if (!this.unitInfoEl) return;
 
@@ -123,7 +115,6 @@ export class UIRenderer {
 
     const command = unit.currentCommand || 'Idle';
 
-    // Afflictions
     let afflictionHtml = '';
     if (unit.afflictions && unit.afflictions.length > 0) {
       const afflictionList = unit.afflictions
@@ -156,13 +147,9 @@ export class UIRenderer {
     `;
   }
 
-  /**
-   * Render a summary for multiple selected units.
-   */
   private renderMultiUnitInfo(units: UnitState[]): void {
     if (!this.unitInfoEl) return;
 
-    // Count units by type
     const typeCounts = new Map<UnitType, number>();
     for (const unit of units) {
       typeCounts.set(unit.type, (typeCounts.get(unit.type) || 0) + 1);
@@ -186,18 +173,168 @@ export class UIRenderer {
   }
 
   // ----------------------------------------------------------
-  // Chat / Audit Log
+  // Building Info Panel
   // ----------------------------------------------------------
 
   /**
-   * Append a chat message to the chat log.
-   *
-   * Messages are color-coded by type (command, communication, observation,
-   * action, status) using CSS classes. Clicking a message invokes the
-   * registered callback with the source unit ID.
-   *
-   * @param message - The chat message to display
+   * Update the unit info panel to show building information instead.
    */
+  updateBuildingInfo(
+    building: BuildingState,
+    resources: Record<ResourceType, number>,
+  ): void {
+    if (!this.unitInfoEl) return;
+
+    const typeName = building.type.charAt(0).toUpperCase() + building.type.slice(1);
+    const gridLabel = positionToLabel(building.position);
+    const healthPercent = Math.round((building.health / building.maxHealth) * 100);
+    const healthColor = healthPercent > 50 ? '#53d769' : healthPercent > 25 ? '#ffcc02' : '#ff3b30';
+
+    // Get producible units for this building type
+    const producible = this.getProducibleUnits(building.type);
+
+    // Production queue display
+    let queueHtml = '';
+    if (building.productionQueue.length > 0) {
+      const queueItems = building.productionQueue
+        .map((ut) => ut.charAt(0).toUpperCase() + ut.slice(1))
+        .join(', ');
+      const progressPct = Math.round(building.productionProgress * 100);
+      queueHtml = `
+        <div style="font-size: 10px; margin-top: 6px; color: #ffcc02;">
+          Producing: ${queueItems} (${progressPct}%)
+          <div style="background: rgba(255,204,2,0.2); height: 4px; border-radius: 2px; margin-top: 1px;">
+            <div style="background: #ffcc02; height: 100%; width: ${progressPct}%; border-radius: 2px;"></div>
+          </div>
+        </div>
+      `;
+    }
+
+    // Train buttons
+    let trainHtml = '';
+    if (!building.isConstructing && producible.length > 0) {
+      const buttons = producible.map((ut) => {
+        const cost = UNIT_COSTS[ut];
+        const name = ut.charAt(0).toUpperCase() + ut.slice(1);
+        const canAfford = resources.minerals >= cost.minerals && resources.energy >= cost.energy;
+        const disabledClass = canAfford ? '' : ' disabled';
+        const costStr = cost.energy > 0
+          ? `${cost.minerals}M ${cost.energy}E`
+          : `${cost.minerals}M`;
+        return `<button class="train-btn${disabledClass}" data-unit-type="${ut}" data-building-id="${building.id}">
+          ${name}<br><span style="font-size: 9px;">${costStr}</span>
+        </button>`;
+      }).join('');
+
+      trainHtml = `<div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px;">${buttons}</div>`;
+    }
+
+    this.unitInfoEl.innerHTML = `
+      <div style="font-size: 12px; font-weight: bold; margin-bottom: 4px;">
+        ${typeName} @ ${gridLabel}
+      </div>
+      <div style="font-size: 11px; margin-bottom: 2px;">
+        Health: ${building.health}/${building.maxHealth}
+        <div style="background: rgba(255,0,0,0.3); height: 4px; border-radius: 2px; margin-top: 1px;">
+          <div style="background: ${healthColor}; height: 100%; width: ${healthPercent}%; border-radius: 2px;"></div>
+        </div>
+      </div>
+      ${building.isConstructing ? `<div style="font-size: 10px; color: #ffcc02;">Under construction (${Math.round(building.constructionProgress * 100)}%)</div>` : ''}
+      ${queueHtml}
+      ${trainHtml}
+    `;
+
+    // Attach click handlers to train buttons
+    if (!building.isConstructing && this.trainUnitCallback) {
+      const callback = this.trainUnitCallback;
+      const buttons = this.unitInfoEl.querySelectorAll('.train-btn:not(.disabled)');
+      buttons.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const unitType = btn.getAttribute('data-unit-type') as UnitType;
+          const buildingId = btn.getAttribute('data-building-id')!;
+          callback(buildingId, unitType);
+        });
+      });
+    }
+  }
+
+  /**
+   * Register a callback for training units from the building panel.
+   */
+  onTrainUnit(callback: (buildingId: string, unitType: UnitType) => void): void {
+    this.trainUnitCallback = callback;
+  }
+
+  /**
+   * Register a callback for when a build menu option is clicked.
+   */
+  onBuildMenuSelect(callback: (buildingType: BuildingType) => void): void {
+    this.buildMenuCallback = callback;
+  }
+
+  /**
+   * Show a floating build menu with building options and costs.
+   */
+  showBuildMenu(): void {
+    // Remove existing build menu if any
+    this.hideBuildMenu();
+
+    const menu = document.createElement('div');
+    menu.id = 'build-menu';
+    menu.className = 'build-menu';
+
+    const buildableTypes: { type: BuildingType; label: string }[] = [
+      { type: BuildingType.BARRACKS, label: 'Barracks' },
+      { type: BuildingType.FACTORY, label: 'Factory' },
+      { type: BuildingType.WATCHTOWER, label: 'Watchtower' },
+    ];
+
+    for (const { type, label } of buildableTypes) {
+      const cost = BUILDING_COSTS[type];
+      const costStr = cost[ResourceType.ENERGY] > 0
+        ? `${cost[ResourceType.MINERALS]}M ${cost[ResourceType.ENERGY]}E`
+        : `${cost[ResourceType.MINERALS]}M`;
+
+      const btn = document.createElement('button');
+      btn.className = 'build-menu-btn';
+      btn.innerHTML = `${label}<br><span style="font-size: 9px; color: #8e8e93;">${costStr}</span>`;
+      btn.addEventListener('click', () => {
+        if (this.buildMenuCallback) {
+          this.buildMenuCallback(type);
+        }
+        this.hideBuildMenu();
+      });
+      menu.appendChild(btn);
+    }
+
+    document.body.appendChild(menu);
+  }
+
+  /**
+   * Hide the build menu.
+   */
+  hideBuildMenu(): void {
+    const existing = document.getElementById('build-menu');
+    if (existing) existing.remove();
+  }
+
+  /**
+   * Reverse-lookup which unit types a building can produce.
+   */
+  private getProducibleUnits(buildingType: BuildingType): UnitType[] {
+    const result: UnitType[] = [];
+    for (const [unitType, bType] of Object.entries(PRODUCTION_BUILDINGS)) {
+      if (bType === buildingType) {
+        result.push(unitType as UnitType);
+      }
+    }
+    return result;
+  }
+
+  // ----------------------------------------------------------
+  // Chat / Audit Log
+  // ----------------------------------------------------------
+
   addChatMessage(message: {
     unitId: string;
     unitType: UnitType;
@@ -213,7 +350,6 @@ export class UIRenderer {
     div.setAttribute('data-unit-id', message.unitId);
     div.textContent = `[${icon}@${message.gridLabel}] ${message.content}`;
 
-    // Click handler to select the source unit
     if (this.chatClickCallback) {
       const callback = this.chatClickCallback;
       div.addEventListener('click', () => {
@@ -226,26 +362,17 @@ export class UIRenderer {
 
     this.chatLogEl.appendChild(div);
 
-    // Enforce message limit
     while (this.chatLogEl.children.length > UIRenderer.MAX_CHAT_MESSAGES) {
       this.chatLogEl.removeChild(this.chatLogEl.firstChild!);
     }
 
-    // Auto-scroll to bottom
     this.chatLogEl.scrollTop = this.chatLogEl.scrollHeight;
   }
 
-  /**
-   * Register a callback that fires when a chat message is clicked.
-   * The callback receives the unit ID of the message source.
-   */
   onChatMessageClick(callback: (unitId: string) => void): void {
     this.chatClickCallback = callback;
   }
 
-  /**
-   * Clear all messages from the chat log.
-   */
   clearChat(): void {
     if (this.chatLogEl) {
       this.chatLogEl.innerHTML = '';
@@ -256,11 +383,6 @@ export class UIRenderer {
   // Hotkey Bar
   // ----------------------------------------------------------
 
-  /**
-   * Update the hotkey bar slots.
-   *
-   * @param hotkeys - Map from hotkey key ("1"-"0") to array of unit IDs
-   */
   updateHotkeys(hotkeys: Map<string, string[]>): void {
     const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 
@@ -289,9 +411,6 @@ export class UIRenderer {
   // Voice Indicator
   // ----------------------------------------------------------
 
-  /**
-   * Show or hide the voice recording indicator.
-   */
   setVoiceActive(active: boolean): void {
     if (!this.voiceIndicatorEl) return;
 
@@ -306,27 +425,17 @@ export class UIRenderer {
   // Command Bar
   // ----------------------------------------------------------
 
-  /**
-   * Show the command bar and focus the input.
-   */
   showCommandBar(): void {
     this.commandBarEl?.classList.add('visible');
-    // Defer focus so it doesn't conflict with the mouseup that triggered selection
     setTimeout(() => this.commandInputEl?.focus(), 0);
   }
 
-  /**
-   * Hide the command bar and clear the input.
-   */
   hideCommandBar(): void {
     this.commandBarEl?.classList.remove('visible');
     if (this.commandInputEl) this.commandInputEl.value = '';
     this.micBtnEl?.classList.remove('recording');
   }
 
-  /**
-   * Toggle recording state on the mic button.
-   */
   setMicRecording(active: boolean): void {
     if (!this.micBtnEl) return;
     if (active) {
@@ -336,10 +445,6 @@ export class UIRenderer {
     }
   }
 
-  /**
-   * Register a callback for when the user submits a command (Enter key).
-   * The callback receives the command text; the input is cleared afterward.
-   */
   onCommandSubmit(callback: (command: string) => void): void {
     this.commandInputEl?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
@@ -349,14 +454,10 @@ export class UIRenderer {
           this.commandInputEl!.value = '';
         }
       }
-      // Prevent game hotkeys from firing while typing
       e.stopPropagation();
     });
   }
 
-  /**
-   * Register a callback for when the mic button is clicked.
-   */
   onMicButtonClick(callback: () => void): void {
     this.micBtnEl?.addEventListener('click', callback);
   }
@@ -365,10 +466,6 @@ export class UIRenderer {
   // Helpers
   // ----------------------------------------------------------
 
-  /**
-   * Escape HTML special characters to prevent XSS when inserting
-   * user/unit-generated text into innerHTML.
-   */
   private escapeHtml(text: string): string {
     const div = document.createElement('div');
     div.textContent = text;

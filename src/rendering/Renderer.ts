@@ -6,12 +6,14 @@ import {
   MapTile,
   UnitState,
   BuildingState,
+  BuildingType,
   FogState,
   GameConfig,
   GridPosition,
   TerrainType,
   UnitType,
   ResourceType,
+  UnitBehaviorState,
   TERRAIN_COLORS,
   UNIT_ICONS,
   UNIT_STATS,
@@ -20,6 +22,7 @@ import {
   colToLabel,
 } from '../shared/types';
 import { Camera } from './Camera';
+import { SpriteManager, behaviorToAnimState } from './SpriteManager';
 
 /**
  * State snapshot consumed by the renderer each frame.
@@ -33,22 +36,26 @@ export interface RenderState {
   selectedUnitIds: Set<string>;
   localPlayerId: string;
   selectionRect: { x: number; y: number; width: number; height: number } | null;
+  currentTick: number;
+  buildPlacementMode: { buildingType: BuildingType; mouseGridPos: GridPosition } | null;
+  heatMapData: Map<string, number> | null;
+  /** Unit IDs currently sharing vision history via idle proximity. */
+  sharingUnitIds: Set<string>;
 }
 
 /**
  * Main canvas renderer for the game map, units, buildings, fog, and overlays.
- *
- * Draws the top-down game world each frame using the HTML5 Canvas 2D API.
- * All world-to-screen transformations are delegated to the Camera.
  */
 export class Renderer {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private camera: Camera;
+  private spriteManager: SpriteManager;
 
-  constructor(canvas: HTMLCanvasElement, camera: Camera) {
+  constructor(canvas: HTMLCanvasElement, camera: Camera, spriteManager: SpriteManager) {
     this.canvas = canvas;
     this.camera = camera;
+    this.spriteManager = spriteManager;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) {
@@ -61,33 +68,25 @@ export class Renderer {
   // Public API
   // ----------------------------------------------------------
 
-  /**
-   * Render a complete frame from the given state snapshot.
-   */
   render(state: RenderState): void {
     const { ctx, canvas } = this;
 
-    // 1. Clear canvas
     ctx.fillStyle = '#1a1a2e';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // 2. Render layers in order
     this.renderTerrain(state);
     this.renderGrid(state);
     this.renderBuildings(state);
     this.renderFog(state);
+    this.renderHeatMap(state);
     this.renderUnits(state);
+    this.renderBuildPlacement(state);
     this.renderSelectionBox(state);
   }
 
-  /**
-   * Resize the canvas to fill its container and update the camera dimensions.
-   */
   handleResize(): void {
-    // Account for the sidebar: the canvas is flex:1 inside game-container
     this.canvas.width = this.canvas.clientWidth;
     this.canvas.height = this.canvas.clientHeight;
-
     this.camera.resize(this.canvas.width, this.canvas.height);
   }
 
@@ -95,10 +94,6 @@ export class Renderer {
   // Private render passes
   // ----------------------------------------------------------
 
-  /**
-   * Draw terrain tiles using TERRAIN_COLORS. Resource deposits get
-   * a small indicator shape on top.
-   */
   private renderTerrain(state: RenderState): void {
     const { ctx, camera } = this;
     const { config, tiles } = state;
@@ -114,18 +109,15 @@ export class Renderer {
         const screen = camera.gridToScreen({ col, row }, tileSize);
         const size = tileSize * camera.zoom;
 
-        // Fill terrain color
         ctx.fillStyle = TERRAIN_COLORS[tile.terrain];
         ctx.fillRect(screen.x, screen.y, size, size);
 
-        // Resource indicator
         if (tile.resource && tile.resourceAmount > 0) {
           const cx = screen.x + size / 2;
           const cy = screen.y + size / 2;
           const indicatorSize = size * 0.25;
 
           if (tile.resource === ResourceType.MINERALS) {
-            // Diamond shape for minerals (cyan)
             ctx.fillStyle = '#5ac8fa';
             ctx.beginPath();
             ctx.moveTo(cx, cy - indicatorSize);
@@ -135,7 +127,6 @@ export class Renderer {
             ctx.closePath();
             ctx.fill();
           } else if (tile.resource === ResourceType.ENERGY) {
-            // Circle for energy (yellow)
             ctx.fillStyle = '#ffcc02';
             ctx.beginPath();
             ctx.arc(cx, cy, indicatorSize, 0, Math.PI * 2);
@@ -146,9 +137,6 @@ export class Renderer {
     }
   }
 
-  /**
-   * Draw subtle grid lines and axis labels (column letters, row numbers).
-   */
   private renderGrid(state: RenderState): void {
     const { ctx, camera } = this;
     const { config } = state;
@@ -160,7 +148,6 @@ export class Renderer {
     ctx.strokeStyle = 'rgba(255,255,255,0.08)';
     ctx.lineWidth = 1;
 
-    // Vertical lines
     for (let col = bounds.minCol; col <= bounds.maxCol + 1; col++) {
       const screen = camera.worldToScreen(col * tileSize, 0);
       ctx.beginPath();
@@ -169,7 +156,6 @@ export class Renderer {
       ctx.stroke();
     }
 
-    // Horizontal lines
     for (let row = bounds.minRow; row <= bounds.maxRow + 1; row++) {
       const screen = camera.worldToScreen(0, row * tileSize);
       ctx.beginPath();
@@ -178,14 +164,12 @@ export class Renderer {
       ctx.stroke();
     }
 
-    // Axis labels
     const labelFontSize = Math.max(8, Math.min(12, size * 0.35));
     ctx.font = `${labelFontSize}px 'Courier New', monospace`;
     ctx.fillStyle = 'rgba(255,255,255,0.35)';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
 
-    // Column labels along the top
     for (let col = bounds.minCol; col <= bounds.maxCol; col++) {
       const screen = camera.gridToScreen({ col, row: 0 }, tileSize);
       const labelX = screen.x + size / 2;
@@ -193,7 +177,6 @@ export class Renderer {
       ctx.fillText(colToLabel(col), labelX, labelY);
     }
 
-    // Row labels along the left
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     for (let row = bounds.minRow; row <= bounds.maxRow; row++) {
@@ -205,20 +188,12 @@ export class Renderer {
   }
 
   /**
-   * Draw buildings as colored rectangles with type abbreviation.
-   * Shows a construction progress bar if still being built.
+   * Draw buildings using pixel sprites from SpriteManager.
    */
   private renderBuildings(state: RenderState): void {
     const { ctx, camera } = this;
     const { config, buildings } = state;
     const { tileSize } = config;
-
-    const abbreviations: Record<string, string> = {
-      base: 'B',
-      barracks: 'R',
-      factory: 'F',
-      watchtower: 'W',
-    };
 
     for (const building of buildings.values()) {
       const pos = building.position;
@@ -226,34 +201,26 @@ export class Renderer {
 
       const screen = camera.gridToScreen(pos, tileSize);
       const size = tileSize * camera.zoom;
+      const isSmall = building.type === BuildingType.WATCHTOWER;
+      const bWidth = isSmall ? size : size * 2;
+      const bHeight = isSmall ? size : size * 2;
 
-      // Watchtower is 1x1, all others are 2x2
-      const bWidth = building.type === 'watchtower' ? size : size * 2;
-      const bHeight = building.type === 'watchtower' ? size : size * 2;
-
-      // Player color
       const playerIndex = this.getPlayerIndex(building.playerId);
-      const color = PLAYER_COLORS[playerIndex] || PLAYER_COLORS[0];
 
-      // Fill
-      ctx.fillStyle = color;
-      ctx.globalAlpha = building.isConstructing ? 0.5 : 0.8;
-      ctx.fillRect(screen.x, screen.y, bWidth, bHeight);
-      ctx.globalAlpha = 1.0;
+      // Draw sprite
+      const sprite = this.spriteManager.getBuildingSprite(
+        building.type,
+        playerIndex,
+        building.isConstructing,
+      );
 
-      // Border
-      ctx.strokeStyle = 'rgba(255,255,255,0.4)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(screen.x, screen.y, bWidth, bHeight);
-
-      // Abbreviation text
-      const abbr = abbreviations[building.type] || '?';
-      const fontSize = Math.max(10, bWidth * 0.35);
-      ctx.font = `bold ${fontSize}px 'Courier New', monospace`;
-      ctx.fillStyle = '#ffffff';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(abbr, screen.x + bWidth / 2, screen.y + bHeight / 2);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(
+        sprite.canvas as any,
+        sprite.sx, sprite.sy, sprite.sw, sprite.sh,
+        screen.x, screen.y, bWidth, bHeight,
+      );
+      ctx.imageSmoothingEnabled = true;
 
       // Construction progress bar
       if (building.isConstructing) {
@@ -262,21 +229,14 @@ export class Renderer {
         const barX = screen.x + (bWidth - barWidth) / 2;
         const barY = screen.y + bHeight + 2;
 
-        // Background
         ctx.fillStyle = 'rgba(0,0,0,0.6)';
         ctx.fillRect(barX, barY, barWidth, barHeight);
-
-        // Progress fill
         ctx.fillStyle = '#ffcc02';
         ctx.fillRect(barX, barY, barWidth * building.constructionProgress, barHeight);
       }
     }
   }
 
-  /**
-   * Draw fog of war overlay per tile.
-   * UNEXPLORED = solid black, EXPLORED = semi-transparent, VISIBLE = no overlay.
-   */
   private renderFog(state: RenderState): void {
     const { ctx, camera } = this;
     const { config, fog } = state;
@@ -306,20 +266,71 @@ export class Renderer {
   }
 
   /**
-   * Draw all visible units as colored circles with icon letters.
-   * Selected units get a green ring, all units show a health bar.
-   * Units with a path show a dotted line to their target.
+   * Render per-unit vision heat map overlay.
+   */
+  private renderHeatMap(state: RenderState): void {
+    if (!state.heatMapData) return;
+
+    const { ctx, camera } = this;
+    const { config } = state;
+    const { tileSize } = config;
+    const currentTick = state.currentTick;
+
+    const bounds = camera.getVisibleGridBounds(tileSize, config.mapWidth, config.mapHeight);
+
+    for (let row = bounds.minRow; row <= bounds.maxRow; row++) {
+      for (let col = bounds.minCol; col <= bounds.maxCol; col++) {
+        const screen = camera.gridToScreen({ col, row }, tileSize);
+        const size = tileSize * camera.zoom;
+        const key = `${col},${row}`;
+        const lastSeen = state.heatMapData.get(key);
+
+        if (lastSeen === undefined) {
+          // Never seen by selected unit(s)
+          ctx.fillStyle = 'rgba(0,0,0,0.7)';
+          ctx.fillRect(screen.x, screen.y, size, size);
+        } else {
+          const age = currentTick - lastSeen;
+          if (age <= 1) {
+            // Currently visible
+            ctx.fillStyle = 'rgba(0,255,100,0.25)';
+          } else if (age <= 100) {
+            // Recent (fading green)
+            const alpha = 0.2 * (1 - age / 100);
+            ctx.fillStyle = `rgba(0,255,100,${alpha.toFixed(3)})`;
+          } else if (age <= 600) {
+            // Old (very dim)
+            const alpha = 0.15 * (1 - (age - 100) / 500);
+            ctx.fillStyle = `rgba(0,200,80,${Math.max(0, alpha).toFixed(3)})`;
+          } else {
+            // Very old
+            ctx.fillStyle = 'rgba(0,0,0,0.5)';
+          }
+          ctx.fillRect(screen.x, screen.y, size, size);
+        }
+      }
+    }
+
+    // Label
+    ctx.fillStyle = 'rgba(0,255,100,0.8)';
+    ctx.font = "bold 14px 'Courier New', monospace";
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('HEAT MAP [H to toggle]', 10, 40);
+  }
+
+  /**
+   * Draw all visible units using pixel sprites.
    */
   private renderUnits(state: RenderState): void {
     const { ctx, camera } = this;
-    const { config, units, selectedUnitIds, fog, localPlayerId } = state;
+    const { config, units, selectedUnitIds, fog, localPlayerId, currentTick } = state;
     const { tileSize } = config;
 
     for (const unit of units.values()) {
       const pos = unit.position;
       if (!camera.isGridVisible(pos, tileSize)) continue;
 
-      // Hide enemy units that aren't in currently visible tiles
       if (unit.playerId !== localPlayerId) {
         const fogRow = fog[pos.row];
         if (!fogRow || fogRow[pos.col] !== FogState.VISIBLE) continue;
@@ -331,16 +342,14 @@ export class Renderer {
       const cy = screen.y + size / 2;
       const radius = size * 0.35;
 
-      // Player color
       const playerIndex = this.getPlayerIndex(unit.playerId);
-      const color = PLAYER_COLORS[playerIndex] || PLAYER_COLORS[0];
 
       // Draw path if unit has one
       if (unit.path && unit.path.length > 0) {
         this.renderUnitPath(unit, cx, cy, tileSize, size);
       }
 
-      // Selection ring (draw behind the unit circle)
+      // Selection ring
       if (selectedUnitIds.has(unit.id)) {
         ctx.strokeStyle = '#53d769';
         ctx.lineWidth = 2 * camera.zoom;
@@ -349,29 +358,43 @@ export class Renderer {
         ctx.stroke();
       }
 
-      // Unit circle
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-      ctx.fill();
+      // Draw unit sprite
+      const animState = behaviorToAnimState(unit.behaviorState);
+      const frame = this.spriteManager.getUnitFrame(unit.type, playerIndex, animState, currentTick);
 
-      // Unit icon letter
-      const icon = UNIT_ICONS[unit.type] || '?';
-      const fontSize = Math.max(8, radius * 1.2);
-      ctx.font = `bold ${fontSize}px 'Courier New', monospace`;
-      ctx.fillStyle = '#ffffff';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(icon, cx, cy);
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+
+      if (unit.facingDirection === 'left') {
+        // Flip horizontally
+        ctx.translate(screen.x + size, screen.y);
+        ctx.scale(-1, 1);
+        ctx.drawImage(
+          frame.canvas as any,
+          frame.sx, frame.sy, frame.sw, frame.sh,
+          0, 0, size, size,
+        );
+      } else {
+        ctx.drawImage(
+          frame.canvas as any,
+          frame.sx, frame.sy, frame.sw, frame.sh,
+          screen.x, screen.y, size, size,
+        );
+      }
+
+      ctx.imageSmoothingEnabled = true;
+      ctx.restore();
 
       // Health bar above the unit
       this.renderHealthBar(unit, cx, cy, radius, size);
+
+      // Speech bubble icon when sharing vision with a nearby idle unit
+      if (state.sharingUnitIds.has(unit.id)) {
+        this.renderSharingIcon(cx, cy, radius, camera.zoom);
+      }
     }
   }
 
-  /**
-   * Draw a dotted line from unit center to each waypoint along its path.
-   */
   private renderUnitPath(
     unit: UnitState,
     startCx: number,
@@ -399,10 +422,6 @@ export class Renderer {
     ctx.setLineDash([]);
   }
 
-  /**
-   * Draw a small health bar above a unit.
-   * Color transitions: green > 50%, yellow > 25%, red <= 25%.
-   */
   private renderHealthBar(
     unit: UnitState,
     cx: number,
@@ -421,11 +440,9 @@ export class Renderer {
     const barY = cy - radius - 4 * camera.zoom - barHeight;
     const healthPercent = Math.max(0, Math.min(1, unit.health / stats.maxHealth));
 
-    // Background
     ctx.fillStyle = 'rgba(255,0,0,0.6)';
     ctx.fillRect(barX, barY, barWidth, barHeight);
 
-    // Health fill
     const healthColor =
       healthPercent > 0.5 ? '#53d769' : healthPercent > 0.25 ? '#ffcc02' : '#ff3b30';
     ctx.fillStyle = healthColor;
@@ -433,8 +450,130 @@ export class Renderer {
   }
 
   /**
-   * Draw a dashed selection rectangle when the user is drag-selecting.
+   * Draw a small speech-bubble icon above a unit that is sharing vision.
    */
+  private renderSharingIcon(cx: number, cy: number, radius: number, zoom: number): void {
+    const { ctx } = this;
+    const iconSize = 8 * zoom;
+    const ix = cx;
+    const iy = cy - radius - 12 * zoom;
+
+    ctx.save();
+
+    // Bubble body
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.beginPath();
+    ctx.roundRect(
+      ix - iconSize / 2, iy - iconSize / 2,
+      iconSize, iconSize * 0.75,
+      2 * zoom,
+    );
+    ctx.fill();
+
+    // Bubble tail
+    ctx.beginPath();
+    ctx.moveTo(ix - 1.5 * zoom, iy + iconSize * 0.25);
+    ctx.lineTo(ix - 3 * zoom, iy + iconSize * 0.5);
+    ctx.lineTo(ix + 0.5 * zoom, iy + iconSize * 0.25);
+    ctx.fill();
+
+    // "..." dots inside the bubble
+    ctx.fillStyle = '#5ac8fa';
+    const dotR = 0.7 * zoom;
+    const dotY = iy - iconSize * 0.05;
+    for (let d = -1; d <= 1; d++) {
+      ctx.beginPath();
+      ctx.arc(ix + d * 2.2 * zoom, dotY, dotR, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  /**
+   * Draw build placement ghost at cursor position.
+   */
+  private renderBuildPlacement(state: RenderState): void {
+    if (!state.buildPlacementMode) return;
+
+    const { ctx, camera } = this;
+    const { config, tiles } = state;
+    const { tileSize } = config;
+    const { buildingType, mouseGridPos } = state.buildPlacementMode;
+    const isSmall = buildingType === BuildingType.WATCHTOWER;
+    const footprintSize = isSmall ? 1 : 2;
+
+    const size = tileSize * camera.zoom;
+    const screen = camera.gridToScreen(mouseGridPos, tileSize);
+    const bWidth = footprintSize * size;
+    const bHeight = footprintSize * size;
+
+    // Check validity of all footprint tiles
+    let valid = true;
+    for (let dr = 0; dr < footprintSize; dr++) {
+      for (let dc = 0; dc < footprintSize; dc++) {
+        const r = mouseGridPos.row + dr;
+        const c = mouseGridPos.col + dc;
+        const tile = tiles[r]?.[c];
+        if (!tile || !tile.walkable) {
+          valid = false;
+          break;
+        }
+      }
+      if (!valid) break;
+    }
+
+    // Check overlap with existing buildings
+    if (valid) {
+      for (const building of state.buildings.values()) {
+        const bFootprint = building.type === BuildingType.WATCHTOWER ? 1 : 2;
+        for (let dr = 0; dr < footprintSize; dr++) {
+          for (let dc = 0; dc < footprintSize; dc++) {
+            for (let br = 0; br < bFootprint; br++) {
+              for (let bc = 0; bc < bFootprint; bc++) {
+                if (
+                  mouseGridPos.row + dr === building.position.row + br &&
+                  mouseGridPos.col + dc === building.position.col + bc
+                ) {
+                  valid = false;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Draw semi-transparent ghost with color tint
+    const playerIndex = this.getPlayerIndex(state.localPlayerId);
+    const sprite = this.spriteManager.getBuildingSprite(buildingType, playerIndex, false);
+
+    ctx.save();
+    ctx.globalAlpha = 0.6;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(
+      sprite.canvas as any,
+      sprite.sx, sprite.sy, sprite.sw, sprite.sh,
+      screen.x, screen.y, bWidth, bHeight,
+    );
+    ctx.imageSmoothingEnabled = true;
+
+    // Green or red tint overlay
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = valid ? '#00ff00' : '#ff0000';
+    ctx.fillRect(screen.x, screen.y, bWidth, bHeight);
+    ctx.globalAlpha = 1.0;
+
+    // Border
+    ctx.strokeStyle = valid ? '#00ff00' : '#ff0000';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    ctx.strokeRect(screen.x, screen.y, bWidth, bHeight);
+    ctx.setLineDash([]);
+
+    ctx.restore();
+  }
+
   private renderSelectionBox(state: RenderState): void {
     if (!state.selectionRect) return;
 
@@ -447,7 +586,6 @@ export class Renderer {
     ctx.strokeRect(x, y, width, height);
     ctx.setLineDash([]);
 
-    // Semi-transparent fill
     ctx.fillStyle = 'rgba(83, 215, 105, 0.1)';
     ctx.fillRect(x, y, width, height);
   }
@@ -456,10 +594,6 @@ export class Renderer {
   // Helpers
   // ----------------------------------------------------------
 
-  /**
-   * Extract a 0-based player index from a player ID string.
-   * Expects formats like "player-0", "player-1", or just "0", "1".
-   */
   private getPlayerIndex(playerId: string): number {
     const match = playerId.match(/(\d+)/);
     return match ? parseInt(match[1], 10) % PLAYER_COLORS.length : 0;

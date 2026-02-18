@@ -24,6 +24,8 @@ export interface MinimapState {
   config: GameConfig;
   cameraViewport: { x: number; y: number; width: number; height: number };
   localPlayerId: string;
+  heatMapData: Map<string, number> | null;
+  currentTick: number;
 }
 
 /**
@@ -80,6 +82,7 @@ export class MinimapRenderer {
     // Render layers
     this.renderTerrain(state);
     this.renderFog(state);
+    this.renderHeatMap(state);
     this.renderBuildings(state);
     this.renderUnits(state);
     this.renderViewport(state);
@@ -157,6 +160,53 @@ export class MinimapRenderer {
           Math.ceil(this.scaleX),
           Math.ceil(this.scaleY)
         );
+      }
+    }
+  }
+
+  /**
+   * Draw per-unit vision heat map overlay on the minimap.
+   * Shows automatically when units are selected — green for recently seen,
+   * fading to dark for old/never-seen tiles.
+   */
+  private renderHeatMap(state: MinimapState): void {
+    if (!state.heatMapData) return;
+
+    const { ctx } = this;
+    const { config, currentTick } = state;
+    const w = Math.ceil(this.scaleX);
+    const h = Math.ceil(this.scaleY);
+
+    for (let row = 0; row < config.mapHeight; row++) {
+      for (let col = 0; col < config.mapWidth; col++) {
+        const key = `${col},${row}`;
+        const lastSeen = state.heatMapData.get(key);
+        const px = col * this.scaleX;
+        const py = row * this.scaleY;
+
+        if (lastSeen === undefined) {
+          // Never seen by selected unit(s) — dark overlay
+          ctx.fillStyle = 'rgba(0,0,0,0.7)';
+          ctx.fillRect(px, py, w, h);
+        } else {
+          const age = currentTick - lastSeen;
+          if (age <= 1) {
+            // Currently visible — bright green
+            ctx.fillStyle = 'rgba(0,255,100,0.4)';
+          } else if (age <= 100) {
+            // Recent — fading green
+            const alpha = 0.35 * (1 - age / 100);
+            ctx.fillStyle = `rgba(0,255,100,${alpha.toFixed(3)})`;
+          } else if (age <= 600) {
+            // Old — very dim green
+            const alpha = 0.15 * (1 - (age - 100) / 500);
+            ctx.fillStyle = `rgba(0,200,80,${Math.max(0, alpha).toFixed(3)})`;
+          } else {
+            // Very old — dark
+            ctx.fillStyle = 'rgba(0,0,0,0.5)';
+          }
+          ctx.fillRect(px, py, w, h);
+        }
       }
     }
   }
