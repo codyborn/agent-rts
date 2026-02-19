@@ -25,6 +25,7 @@ import {
   UnitBehaviorState,
   gridDistance,
 } from './shared/types';
+import { HEX_WIDTH, HEX_HEIGHT, HEX_VERT_SPACING, hexNeighbors } from './hex/HexUtils';
 import { GameEngine, System } from './engine/GameEngine';
 import { GameMap } from './map/GameMap';
 import { FogOfWar } from './map/FogOfWar';
@@ -36,6 +37,7 @@ import { Renderer, RenderState } from './rendering/Renderer';
 import { MinimapRenderer } from './rendering/MinimapRenderer';
 import { UIRenderer } from './rendering/UIRenderer';
 import { SpriteManager } from './rendering/SpriteManager';
+import { TerrainTextureManager } from './rendering/TerrainTextureManager';
 import { classifyInput } from './player/InputClassifier';
 import { PlayerController } from './player/PlayerController';
 import { AgentController } from './ai/AgentController';
@@ -170,15 +172,18 @@ function resizeCanvas() {
 }
 resizeCanvas();
 
-const worldWidth = config.mapWidth * config.tileSize;
-const worldHeight = config.mapHeight * config.tileSize;
+const worldWidth = config.mapWidth * HEX_WIDTH + HEX_WIDTH;
+const worldHeight = config.mapHeight * HEX_VERT_SPACING + HEX_VERT_SPACING + HEX_HEIGHT * 0.25;
 const camera = new Camera(gameCanvas.width, gameCanvas.height, worldWidth, worldHeight);
 camera.centerOn(basePosition, config.tileSize);
 
 const spriteManager = new SpriteManager();
 spriteManager.init();
 
-const renderer = new Renderer(gameCanvas, camera, spriteManager);
+const terrainTextures = new TerrainTextureManager();
+terrainTextures.init();
+
+const renderer = new Renderer(gameCanvas, camera, spriteManager, terrainTextures);
 const minimapRenderer = new MinimapRenderer(minimapCanvas);
 const uiRenderer = new UIRenderer();
 
@@ -250,19 +255,12 @@ function findBuildLocation(origin: GridPosition, buildingType: BuildingType): Gr
 }
 
 /**
- * Find a walkable tile adjacent to a building footprint for the engineer to stand on.
+ * Find a walkable tile adjacent to a building position (hex neighbors).
  */
-function findAdjacentWalkable(buildPos: GridPosition, footprint: number): GridPosition {
-  // Check tiles around the footprint perimeter
-  for (let dr = -1; dr <= footprint; dr++) {
-    for (let dc = -1; dc <= footprint; dc++) {
-      // Skip interior tiles
-      if (dr >= 0 && dr < footprint && dc >= 0 && dc < footprint) continue;
-      const r = buildPos.row + dr;
-      const c = buildPos.col + dc;
-      const tile = gameMap.tiles[r]?.[c];
-      if (tile && tile.walkable) return { row: r, col: c };
-    }
+function findAdjacentWalkable(buildPos: GridPosition, _footprint: number): GridPosition {
+  for (const neighbor of hexNeighbors(buildPos)) {
+    const tile = gameMap.tiles[neighbor.row]?.[neighbor.col];
+    if (tile && tile.walkable) return neighbor;
   }
   return buildPos;
 }
@@ -443,9 +441,10 @@ const keysHeld = new Set<string>();
 window.addEventListener('keydown', (e) => keysHeld.add(e.key.toLowerCase()));
 window.addEventListener('keyup', (e) => keysHeld.delete(e.key.toLowerCase()));
 
-// Edge panning with mouse + grid tooltip
+// Edge panning with mouse + grid tooltip + hovered hex tracking
 let mouseX = 0;
 let mouseY = 0;
+let hoveredHex: GridPosition | null = null;
 const gridTooltip = document.getElementById('grid-tooltip')!;
 gameCanvas.addEventListener('mousemove', (e) => {
   const rect = gameCanvas.getBoundingClientRect();
@@ -454,15 +453,18 @@ gameCanvas.addEventListener('mousemove', (e) => {
 
   const gridPos = camera.screenToGrid(mouseX, mouseY, config.tileSize);
   if (gridPos.col >= 0 && gridPos.col < config.mapWidth && gridPos.row >= 0 && gridPos.row < config.mapHeight) {
+    hoveredHex = gridPos;
     gridTooltip.textContent = positionToLabel(gridPos);
     gridTooltip.style.left = `${e.clientX + 12}px`;
     gridTooltip.style.top = `${e.clientY + 12}px`;
     gridTooltip.style.display = 'block';
   } else {
+    hoveredHex = null;
     gridTooltip.style.display = 'none';
   }
 });
 gameCanvas.addEventListener('mouseleave', () => {
+  hoveredHex = null;
   gridTooltip.style.display = 'none';
 });
 
@@ -1200,6 +1202,7 @@ engine.onFrame = () => {
     buildPlacementMode,
     heatMapData,
     sharingUnitIds,
+    hoveredHex,
   };
 
   // ---- Render ----

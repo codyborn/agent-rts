@@ -10,12 +10,9 @@ import {
   FogState,
   GameConfig,
   GridPosition,
-  TerrainType,
   UnitType,
   ResourceType,
   UnitBehaviorState,
-  TERRAIN_COLORS,
-  UNIT_ICONS,
   UNIT_STATS,
   PLAYER_COLORS,
   positionToLabel,
@@ -23,6 +20,8 @@ import {
 } from '../shared/types';
 import { Camera } from './Camera';
 import { SpriteManager, behaviorToAnimState } from './SpriteManager';
+import { TerrainTextureManager, TEX_W, TEX_H } from './TerrainTextureManager';
+import { hexToPixel, traceHexPath, HEX_SIZE, HEX_WIDTH, HEX_HEIGHT } from '../hex/HexUtils';
 
 /**
  * State snapshot consumed by the renderer each frame.
@@ -41,6 +40,8 @@ export interface RenderState {
   heatMapData: Map<string, number> | null;
   /** Unit IDs currently sharing vision history via idle proximity. */
   sharingUnitIds: Set<string>;
+  /** Currently hovered hex tile for hover highlight. */
+  hoveredHex: GridPosition | null;
 }
 
 /**
@@ -51,11 +52,13 @@ export class Renderer {
   private ctx: CanvasRenderingContext2D;
   private camera: Camera;
   private spriteManager: SpriteManager;
+  private terrainTextures: TerrainTextureManager;
 
-  constructor(canvas: HTMLCanvasElement, camera: Camera, spriteManager: SpriteManager) {
+  constructor(canvas: HTMLCanvasElement, camera: Camera, spriteManager: SpriteManager, terrainTextures: TerrainTextureManager) {
     this.canvas = canvas;
     this.camera = camera;
     this.spriteManager = spriteManager;
+    this.terrainTextures = terrainTextures;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) {
@@ -76,6 +79,7 @@ export class Renderer {
 
     this.renderTerrain(state);
     this.renderGrid(state);
+    this.renderHoverHighlight(state);
     this.renderBuildings(state);
     this.renderFog(state);
     this.renderHeatMap(state);
@@ -95,41 +99,48 @@ export class Renderer {
   // ----------------------------------------------------------
 
   private renderTerrain(state: RenderState): void {
-    const { ctx, camera } = this;
+    const { ctx, camera, terrainTextures } = this;
     const { config, tiles } = state;
     const { tileSize } = config;
 
     const bounds = camera.getVisibleGridBounds(tileSize, config.mapWidth, config.mapHeight);
+    const scaledSize = HEX_SIZE * camera.zoom;
+    const drawW = TEX_W * camera.zoom;
+    const drawH = TEX_H * camera.zoom;
+
+    // Compute water animation frame once (cycles every 500ms)
+    const waterAnimFrame = Math.floor(performance.now() / 500) % 3;
 
     for (let row = bounds.minRow; row <= bounds.maxRow; row++) {
       for (let col = bounds.minCol; col <= bounds.maxCol; col++) {
         const tile = tiles[row]?.[col];
         if (!tile) continue;
 
-        const screen = camera.gridToScreen({ col, row }, tileSize);
-        const size = tileSize * camera.zoom;
+        const center = camera.gridToScreenCenter({ col, row });
+        const tex = terrainTextures.getTexture(tile.terrain, col, row, waterAnimFrame);
 
-        ctx.fillStyle = TERRAIN_COLORS[tile.terrain];
-        ctx.fillRect(screen.x, screen.y, size, size);
+        ctx.drawImage(
+          tex as any,
+          0, 0, TEX_W, TEX_H,
+          center.x - drawW / 2, center.y - drawH / 2, drawW, drawH,
+        );
 
         if (tile.resource && tile.resourceAmount > 0) {
-          const cx = screen.x + size / 2;
-          const cy = screen.y + size / 2;
-          const indicatorSize = size * 0.25;
+          const indicatorSize = scaledSize * 0.25;
 
           if (tile.resource === ResourceType.MINERALS) {
             ctx.fillStyle = '#5ac8fa';
             ctx.beginPath();
-            ctx.moveTo(cx, cy - indicatorSize);
-            ctx.lineTo(cx + indicatorSize, cy);
-            ctx.lineTo(cx, cy + indicatorSize);
-            ctx.lineTo(cx - indicatorSize, cy);
+            ctx.moveTo(center.x, center.y - indicatorSize);
+            ctx.lineTo(center.x + indicatorSize, center.y);
+            ctx.lineTo(center.x, center.y + indicatorSize);
+            ctx.lineTo(center.x - indicatorSize, center.y);
             ctx.closePath();
             ctx.fill();
           } else if (tile.resource === ResourceType.ENERGY) {
             ctx.fillStyle = '#ffcc02';
             ctx.beginPath();
-            ctx.arc(cx, cy, indicatorSize, 0, Math.PI * 2);
+            ctx.arc(center.x, center.y, indicatorSize, 0, Math.PI * 2);
             ctx.fill();
           }
         }
@@ -143,98 +154,186 @@ export class Renderer {
     const { tileSize } = config;
 
     const bounds = camera.getVisibleGridBounds(tileSize, config.mapWidth, config.mapHeight);
-    const size = tileSize * camera.zoom;
+    const scaledSize = HEX_SIZE * camera.zoom;
 
     ctx.strokeStyle = 'rgba(255,255,255,0.08)';
     ctx.lineWidth = 1;
 
-    for (let col = bounds.minCol; col <= bounds.maxCol + 1; col++) {
-      const screen = camera.worldToScreen(col * tileSize, 0);
-      ctx.beginPath();
-      ctx.moveTo(Math.round(screen.x), 0);
-      ctx.lineTo(Math.round(screen.x), this.canvas.height);
-      ctx.stroke();
+    for (let row = bounds.minRow; row <= bounds.maxRow; row++) {
+      for (let col = bounds.minCol; col <= bounds.maxCol; col++) {
+        const center = camera.gridToScreenCenter({ col, row });
+        traceHexPath(ctx, center.x, center.y, scaledSize);
+        ctx.stroke();
+      }
     }
 
-    for (let row = bounds.minRow; row <= bounds.maxRow + 1; row++) {
-      const screen = camera.worldToScreen(0, row * tileSize);
-      ctx.beginPath();
-      ctx.moveTo(0, Math.round(screen.y));
-      ctx.lineTo(this.canvas.width, Math.round(screen.y));
-      ctx.stroke();
-    }
-
-    const labelFontSize = Math.max(8, Math.min(12, size * 0.35));
+    // Column labels along the top
+    const labelFontSize = Math.max(8, Math.min(12, scaledSize * 0.6));
     ctx.font = `${labelFontSize}px 'Courier New', monospace`;
     ctx.fillStyle = 'rgba(255,255,255,0.35)';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
 
     for (let col = bounds.minCol; col <= bounds.maxCol; col++) {
-      const screen = camera.gridToScreen({ col, row: 0 }, tileSize);
-      const labelX = screen.x + size / 2;
-      const labelY = Math.max(2, screen.y + 2);
-      ctx.fillText(colToLabel(col), labelX, labelY);
+      const center = camera.gridToScreenCenter({ col, row: 0 });
+      ctx.fillText(colToLabel(col), center.x, Math.max(2, center.y - scaledSize + 2));
     }
 
+    // Row labels along the left
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     for (let row = bounds.minRow; row <= bounds.maxRow; row++) {
-      const screen = camera.gridToScreen({ col: 0, row }, tileSize);
-      const labelX = Math.max(2, screen.x + 2);
-      const labelY = screen.y + size / 2;
-      ctx.fillText(String(row + 1), labelX, labelY);
+      const center = camera.gridToScreenCenter({ col: 0, row });
+      ctx.fillText(String(row + 1), Math.max(2, center.x - scaledSize + 2), center.y);
     }
   }
 
   /**
    * Draw buildings using pixel sprites from SpriteManager.
+   * Buildings are 1-hex footprint, drawn at hex center.
    */
   private renderBuildings(state: RenderState): void {
     const { ctx, camera } = this;
     const { config, buildings } = state;
     const { tileSize } = config;
+    const scaledW = HEX_WIDTH * camera.zoom;
+    const scaledH = HEX_HEIGHT * camera.zoom;
 
     for (const building of buildings.values()) {
       const pos = building.position;
       if (!camera.isGridVisible(pos, tileSize)) continue;
 
-      const screen = camera.gridToScreen(pos, tileSize);
-      const size = tileSize * camera.zoom;
-      const isSmall = building.type === BuildingType.WATCHTOWER;
-      const bWidth = isSmall ? size : size * 2;
-      const bHeight = isSmall ? size : size * 2;
+      const center = camera.gridToScreenCenter(pos);
+      const bWidth = scaledW;
+      const bHeight = scaledH;
+      const screen = { x: center.x - bWidth / 2, y: center.y - bHeight / 2 };
 
       const playerIndex = this.getPlayerIndex(building.playerId);
 
-      // Draw sprite
-      const sprite = this.spriteManager.getBuildingSprite(
-        building.type,
-        playerIndex,
-        building.isConstructing,
-      );
+      if (building.isConstructing) {
+        this.renderConstructingBuilding(building, screen, bWidth, bHeight, playerIndex);
+      } else {
+        const sprite = this.spriteManager.getBuildingSprite(building.type, playerIndex, false);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(
+          sprite.canvas as any,
+          sprite.sx, sprite.sy, sprite.sw, sprite.sh,
+          screen.x, screen.y, bWidth, bHeight,
+        );
+        ctx.imageSmoothingEnabled = true;
+      }
+    }
+  }
+
+  /**
+   * Draw a building under construction as a partial structure rising from
+   * a foundation, with scaffold lines and a labelled progress bar.
+   */
+  private renderConstructingBuilding(
+    building: BuildingState,
+    screen: { x: number; y: number },
+    bWidth: number,
+    bHeight: number,
+    playerIndex: number,
+  ): void {
+    const { ctx, camera } = this;
+    const progress = building.constructionProgress; // 0.0 – 1.0
+
+    // ---- Foundation outline (always visible) ----
+    ctx.strokeStyle = 'rgba(139, 90, 43, 0.7)';
+    ctx.lineWidth = 1.5 * camera.zoom;
+    ctx.setLineDash([4 * camera.zoom, 3 * camera.zoom]);
+    ctx.strokeRect(screen.x + 1, screen.y + 1, bWidth - 2, bHeight - 2);
+    ctx.setLineDash([]);
+
+    // ---- Foundation fill ----
+    ctx.fillStyle = 'rgba(90, 60, 30, 0.25)';
+    ctx.fillRect(screen.x, screen.y, bWidth, bHeight);
+
+    // ---- Partial building sprite (clip from bottom up) ----
+    const sprite = this.spriteManager.getBuildingSprite(building.type, playerIndex, true);
+    const revealFraction = progress;
+    const revealPixels = Math.ceil(bHeight * revealFraction);
+
+    if (revealPixels > 0) {
+      // Compute the bottom portion of the source sprite to draw
+      const srcReveal = Math.ceil(sprite.sh * revealFraction);
+      const srcY = sprite.sy + sprite.sh - srcReveal;
+      const dstY = screen.y + bHeight - revealPixels;
 
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(
         sprite.canvas as any,
-        sprite.sx, sprite.sy, sprite.sw, sprite.sh,
-        screen.x, screen.y, bWidth, bHeight,
+        sprite.sx, srcY, sprite.sw, srcReveal,
+        screen.x, dstY, bWidth, revealPixels,
       );
       ctx.imageSmoothingEnabled = true;
 
-      // Construction progress bar
-      if (building.isConstructing) {
-        const barWidth = bWidth * 0.8;
-        const barHeight = 4 * camera.zoom;
-        const barX = screen.x + (bWidth - barWidth) / 2;
-        const barY = screen.y + bHeight + 2;
-
-        ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.fillRect(barX, barY, barWidth, barHeight);
-        ctx.fillStyle = '#ffcc02';
-        ctx.fillRect(barX, barY, barWidth * building.constructionProgress, barHeight);
-      }
+      // ---- Construction edge line (top of revealed portion) ----
+      ctx.strokeStyle = 'rgba(255, 204, 2, 0.6)';
+      ctx.lineWidth = 1 * camera.zoom;
+      ctx.beginPath();
+      ctx.moveTo(screen.x, dstY);
+      ctx.lineTo(screen.x + bWidth, dstY);
+      ctx.stroke();
     }
+
+    // ---- Scaffold lines (cross-braces over unrevealed area) ----
+    const unrevealedHeight = bHeight - revealPixels;
+    if (unrevealedHeight > 4 * camera.zoom) {
+      ctx.strokeStyle = 'rgba(139, 90, 43, 0.35)';
+      ctx.lineWidth = 1 * camera.zoom;
+      // Vertical scaffold poles
+      const poleX1 = screen.x + bWidth * 0.25;
+      const poleX2 = screen.x + bWidth * 0.75;
+      ctx.beginPath();
+      ctx.moveTo(poleX1, screen.y);
+      ctx.lineTo(poleX1, screen.y + unrevealedHeight);
+      ctx.moveTo(poleX2, screen.y);
+      ctx.lineTo(poleX2, screen.y + unrevealedHeight);
+      ctx.stroke();
+      // Horizontal braces
+      const braceSpacing = 8 * camera.zoom;
+      for (let y = screen.y + braceSpacing; y < screen.y + unrevealedHeight; y += braceSpacing) {
+        ctx.beginPath();
+        ctx.moveTo(poleX1, y);
+        ctx.lineTo(poleX2, y);
+        ctx.stroke();
+      }
+      // Cross diagonals
+      ctx.strokeStyle = 'rgba(139, 90, 43, 0.2)';
+      ctx.beginPath();
+      ctx.moveTo(poleX1, screen.y);
+      ctx.lineTo(poleX2, screen.y + unrevealedHeight);
+      ctx.moveTo(poleX2, screen.y);
+      ctx.lineTo(poleX1, screen.y + unrevealedHeight);
+      ctx.stroke();
+    }
+
+    // ---- Progress bar ----
+    const barWidth = bWidth * 0.85;
+    const barHeight = 5 * camera.zoom;
+    const barX = screen.x + (bWidth - barWidth) / 2;
+    const barY = screen.y + bHeight + 3 * camera.zoom;
+
+    // Background
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.fillRect(barX - 1, barY - 1, barWidth + 2, barHeight + 2);
+    // Track
+    ctx.fillStyle = 'rgba(80, 80, 80, 0.6)';
+    ctx.fillRect(barX, barY, barWidth, barHeight);
+    // Fill
+    ctx.fillStyle = '#ffcc02';
+    ctx.fillRect(barX, barY, barWidth * progress, barHeight);
+
+    // Percentage label
+    const pct = Math.round(progress * 100);
+    const fontSize = Math.max(8, Math.round(9 * camera.zoom));
+    ctx.font = `bold ${fontSize}px 'Courier New', monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(`${pct}%`, screen.x + bWidth / 2, barY + barHeight + 2 * camera.zoom);
   }
 
   private renderFog(state: RenderState): void {
@@ -245,22 +344,22 @@ export class Renderer {
     if (!fog || fog.length === 0) return;
 
     const bounds = camera.getVisibleGridBounds(tileSize, config.mapWidth, config.mapHeight);
+    const scaledSize = HEX_SIZE * camera.zoom;
 
     for (let row = bounds.minRow; row <= bounds.maxRow; row++) {
       for (let col = bounds.minCol; col <= bounds.maxCol; col++) {
         const fogTile = fog[row]?.[col];
         if (!fogTile || fogTile === FogState.VISIBLE) continue;
 
-        const screen = camera.gridToScreen({ col, row }, tileSize);
-        const size = tileSize * camera.zoom;
+        const center = camera.gridToScreenCenter({ col, row });
 
         if (fogTile === FogState.UNEXPLORED) {
           ctx.fillStyle = '#000000';
-          ctx.fillRect(screen.x, screen.y, size, size);
         } else if (fogTile === FogState.EXPLORED) {
           ctx.fillStyle = 'rgba(0,0,0,0.6)';
-          ctx.fillRect(screen.x, screen.y, size, size);
         }
+        traceHexPath(ctx, center.x, center.y, scaledSize);
+        ctx.fill();
       }
     }
   }
@@ -275,39 +374,34 @@ export class Renderer {
     const { config } = state;
     const { tileSize } = config;
     const currentTick = state.currentTick;
+    const scaledSize = HEX_SIZE * camera.zoom;
 
     const bounds = camera.getVisibleGridBounds(tileSize, config.mapWidth, config.mapHeight);
 
     for (let row = bounds.minRow; row <= bounds.maxRow; row++) {
       for (let col = bounds.minCol; col <= bounds.maxCol; col++) {
-        const screen = camera.gridToScreen({ col, row }, tileSize);
-        const size = tileSize * camera.zoom;
+        const center = camera.gridToScreenCenter({ col, row });
         const key = `${col},${row}`;
         const lastSeen = state.heatMapData.get(key);
 
         if (lastSeen === undefined) {
-          // Never seen by selected unit(s)
           ctx.fillStyle = 'rgba(0,0,0,0.7)';
-          ctx.fillRect(screen.x, screen.y, size, size);
         } else {
           const age = currentTick - lastSeen;
           if (age <= 1) {
-            // Currently visible
             ctx.fillStyle = 'rgba(0,255,100,0.25)';
           } else if (age <= 100) {
-            // Recent (fading green)
             const alpha = 0.2 * (1 - age / 100);
             ctx.fillStyle = `rgba(0,255,100,${alpha.toFixed(3)})`;
           } else if (age <= 600) {
-            // Old (very dim)
             const alpha = 0.15 * (1 - (age - 100) / 500);
             ctx.fillStyle = `rgba(0,200,80,${Math.max(0, alpha).toFixed(3)})`;
           } else {
-            // Very old
             ctx.fillStyle = 'rgba(0,0,0,0.5)';
           }
-          ctx.fillRect(screen.x, screen.y, size, size);
         }
+        traceHexPath(ctx, center.x, center.y, scaledSize);
+        ctx.fill();
       }
     }
 
@@ -320,12 +414,14 @@ export class Renderer {
   }
 
   /**
-   * Draw all visible units using pixel sprites.
+   * Draw all visible units using pixel sprites with smooth movement interpolation.
    */
   private renderUnits(state: RenderState): void {
     const { ctx, camera } = this;
     const { config, units, selectedUnitIds, fog, localPlayerId, currentTick } = state;
     const { tileSize } = config;
+    const now = performance.now();
+    const MOVE_DURATION_MS = 200;
 
     for (const unit of units.values()) {
       const pos = unit.position;
@@ -336,11 +432,27 @@ export class Renderer {
         if (!fogRow || fogRow[pos.col] !== FogState.VISIBLE) continue;
       }
 
-      const screen = camera.gridToScreen(pos, tileSize);
-      const size = tileSize * camera.zoom;
-      const cx = screen.x + size / 2;
-      const cy = screen.y + size / 2;
+      // Smooth movement interpolation
+      let worldX: number, worldY: number;
+      if (unit.previousPosition && unit.moveStartTime > 0) {
+        const t = Math.min(1, (now - unit.moveStartTime) / MOVE_DURATION_MS);
+        const prevWorld = hexToPixel(unit.previousPosition);
+        const currWorld = hexToPixel(unit.position);
+        worldX = prevWorld.x + (currWorld.x - prevWorld.x) * t;
+        worldY = prevWorld.y + (currWorld.y - prevWorld.y) * t;
+      } else {
+        const currWorld = hexToPixel(unit.position);
+        worldX = currWorld.x;
+        worldY = currWorld.y;
+      }
+
+      const screenCenter = camera.worldToScreen(worldX, worldY);
+      const cx = screenCenter.x;
+      const cy = screenCenter.y;
+      const size = HEX_HEIGHT * camera.zoom;
       const radius = size * 0.35;
+      const drawX = cx - size / 2;
+      const drawY = cy - size / 2;
 
       const playerIndex = this.getPlayerIndex(unit.playerId);
 
@@ -366,8 +478,7 @@ export class Renderer {
       ctx.imageSmoothingEnabled = false;
 
       if (unit.facingDirection === 'left') {
-        // Flip horizontally
-        ctx.translate(screen.x + size, screen.y);
+        ctx.translate(drawX + size, drawY);
         ctx.scale(-1, 1);
         ctx.drawImage(
           frame.canvas as any,
@@ -378,7 +489,7 @@ export class Renderer {
         ctx.drawImage(
           frame.canvas as any,
           frame.sx, frame.sy, frame.sw, frame.sh,
-          screen.x, screen.y, size, size,
+          drawX, drawY, size, size,
         );
       }
 
@@ -399,8 +510,8 @@ export class Renderer {
     unit: UnitState,
     startCx: number,
     startCy: number,
-    tileSize: number,
-    size: number
+    _tileSize: number,
+    _size: number
   ): void {
     const { ctx, camera } = this;
 
@@ -412,10 +523,8 @@ export class Renderer {
     ctx.moveTo(startCx, startCy);
 
     for (const waypoint of unit.path!) {
-      const wpScreen = camera.gridToScreen(waypoint, tileSize);
-      const wpCx = wpScreen.x + size / 2;
-      const wpCy = wpScreen.y + size / 2;
-      ctx.lineTo(wpCx, wpCy);
+      const wpCenter = camera.gridToScreenCenter(waypoint);
+      ctx.lineTo(wpCenter.x, wpCenter.y);
     }
 
     ctx.stroke();
@@ -491,55 +600,34 @@ export class Renderer {
   }
 
   /**
-   * Draw build placement ghost at cursor position.
+   * Draw build placement ghost at cursor position (hex polygon).
    */
   private renderBuildPlacement(state: RenderState): void {
     if (!state.buildPlacementMode) return;
 
     const { ctx, camera } = this;
-    const { config, tiles } = state;
-    const { tileSize } = config;
+    const { tiles } = state;
     const { buildingType, mouseGridPos } = state.buildPlacementMode;
-    const isSmall = buildingType === BuildingType.WATCHTOWER;
-    const footprintSize = isSmall ? 1 : 2;
+    const scaledSize = HEX_SIZE * camera.zoom;
+    const scaledW = HEX_WIDTH * camera.zoom;
+    const scaledH = HEX_HEIGHT * camera.zoom;
 
-    const size = tileSize * camera.zoom;
-    const screen = camera.gridToScreen(mouseGridPos, tileSize);
-    const bWidth = footprintSize * size;
-    const bHeight = footprintSize * size;
+    const center = camera.gridToScreenCenter(mouseGridPos);
 
-    // Check validity of all footprint tiles
+    // Check validity — buildings are 1-hex footprint
     let valid = true;
-    for (let dr = 0; dr < footprintSize; dr++) {
-      for (let dc = 0; dc < footprintSize; dc++) {
-        const r = mouseGridPos.row + dr;
-        const c = mouseGridPos.col + dc;
-        const tile = tiles[r]?.[c];
-        if (!tile || !tile.walkable) {
-          valid = false;
-          break;
-        }
-      }
-      if (!valid) break;
-    }
+    const tile = tiles[mouseGridPos.row]?.[mouseGridPos.col];
+    if (!tile || !tile.walkable) valid = false;
 
     // Check overlap with existing buildings
     if (valid) {
       for (const building of state.buildings.values()) {
-        const bFootprint = building.type === BuildingType.WATCHTOWER ? 1 : 2;
-        for (let dr = 0; dr < footprintSize; dr++) {
-          for (let dc = 0; dc < footprintSize; dc++) {
-            for (let br = 0; br < bFootprint; br++) {
-              for (let bc = 0; bc < bFootprint; bc++) {
-                if (
-                  mouseGridPos.row + dr === building.position.row + br &&
-                  mouseGridPos.col + dc === building.position.col + bc
-                ) {
-                  valid = false;
-                }
-              }
-            }
-          }
+        if (
+          mouseGridPos.row === building.position.row &&
+          mouseGridPos.col === building.position.col
+        ) {
+          valid = false;
+          break;
         }
       }
     }
@@ -554,23 +642,48 @@ export class Renderer {
     ctx.drawImage(
       sprite.canvas as any,
       sprite.sx, sprite.sy, sprite.sw, sprite.sh,
-      screen.x, screen.y, bWidth, bHeight,
+      center.x - scaledW / 2, center.y - scaledH / 2, scaledW, scaledH,
     );
     ctx.imageSmoothingEnabled = true;
 
-    // Green or red tint overlay
+    // Green or red tint hex overlay
     ctx.globalAlpha = 0.3;
     ctx.fillStyle = valid ? '#00ff00' : '#ff0000';
-    ctx.fillRect(screen.x, screen.y, bWidth, bHeight);
+    traceHexPath(ctx, center.x, center.y, scaledSize);
+    ctx.fill();
     ctx.globalAlpha = 1.0;
 
-    // Border
+    // Hex border
     ctx.strokeStyle = valid ? '#00ff00' : '#ff0000';
     ctx.lineWidth = 2;
     ctx.setLineDash([4, 4]);
-    ctx.strokeRect(screen.x, screen.y, bWidth, bHeight);
+    traceHexPath(ctx, center.x, center.y, scaledSize);
+    ctx.stroke();
     ctx.setLineDash([]);
 
+    ctx.restore();
+  }
+
+  /**
+   * Draw a bright outline on the hovered hex tile.
+   */
+  private renderHoverHighlight(state: RenderState): void {
+    if (!state.hoveredHex) return;
+    const { col, row } = state.hoveredHex;
+    if (col < 0 || row < 0 || col >= state.config.mapWidth || row >= state.config.mapHeight) return;
+
+    const { ctx, camera } = this;
+    const center = camera.gridToScreenCenter(state.hoveredHex);
+    const scaledSize = HEX_SIZE * camera.zoom;
+
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.lineWidth = 2 * camera.zoom;
+    traceHexPath(ctx, center.x, center.y, scaledSize);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+    traceHexPath(ctx, center.x, center.y, scaledSize);
+    ctx.fill();
     ctx.restore();
   }
 
