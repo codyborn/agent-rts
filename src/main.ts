@@ -24,6 +24,7 @@ import {
   BuildingState,
   UnitBehaviorState,
   gridDistance,
+  BASE_COMMAND_RANGE,
 } from './shared/types';
 import { HEX_WIDTH, HEX_HEIGHT, HEX_VERT_SPACING, hexNeighbors } from './hex/HexUtils';
 import { GameEngine, System } from './engine/GameEngine';
@@ -265,6 +266,14 @@ function findAdjacentWalkable(buildPos: GridPosition, _footprint: number): GridP
   return buildPos;
 }
 
+function isUnitInCommRange(unit: { position: GridPosition }, playerId: string): boolean {
+  for (const building of state.getBuildingsForPlayer(playerId)) {
+    if (building.isConstructing) continue;
+    if (gridDistance(unit.position, building.position) <= BASE_COMMAND_RANGE) return true;
+  }
+  return false;
+}
+
 function findBuildingAtPosition(gridPos: GridPosition): BuildingState | null {
   for (const building of state.getAllBuildings()) {
     const footprint = building.type === BuildingType.WATCHTOWER ? 1 : 2;
@@ -421,6 +430,16 @@ gameCanvas.addEventListener('contextmenu', (e) => {
 
   const selected = unitManager.getSelectedUnits(LOCAL_PLAYER_ID);
   for (const unit of selected) {
+    if (!isUnitInCommRange(unit, LOCAL_PLAYER_ID)) {
+      uiRenderer.addChatMessage({
+        unitId: unit.id,
+        unitType: unit.type,
+        content: 'Out of communication range — cannot receive commands.',
+        type: 'status',
+        gridLabel: unit.getGridLabel(),
+      });
+      continue;
+    }
     const path = findPath(unit.position, targetPos, gameMap, unit.type);
     if (path.length > 0) {
       unit.setPath(path);
@@ -503,6 +522,16 @@ uiRenderer.onUnitCommand((unitIds, command) => {
   for (const uid of unitIds) {
     const unit = unitManager.getUnit(uid);
     if (!unit || !unit.isAlive()) continue;
+    if (!isUnitInCommRange(unit, LOCAL_PLAYER_ID)) {
+      uiRenderer.addChatMessage({
+        unitId: unit.id,
+        unitType: unit.type,
+        content: 'Out of communication range — cannot receive commands.',
+        type: 'status',
+        gridLabel: unit.getGridLabel(),
+      });
+      continue;
+    }
 
     switch (command) {
       case 'stop':
@@ -692,6 +721,16 @@ eventBus.on(GameEventType.PLAYER_COMMAND, () => {
 // ---- Unit Q&A handler ----
 async function handleUnitQuestion(question: string, targetUnits: any[]): Promise<void> {
   for (const unit of targetUnits) {
+    if (!isUnitInCommRange(unit, LOCAL_PLAYER_ID)) {
+      uiRenderer.addChatMessage({
+        unitId: unit.id,
+        unitType: unit.type,
+        content: 'Out of communication range — cannot respond.',
+        type: 'status',
+        gridLabel: unit.getGridLabel(),
+      });
+      continue;
+    }
     uiRenderer.addChatMessage({
       unitId: unit.id,
       unitType: unit.type,
@@ -833,19 +872,32 @@ eventBus.on(GameEventType.UNIT_COMMAND, (data: any) => {
       return;
     }
 
+    // Filter to units within communication range
+    const inRangeUnits = targetUnits.filter((u: any) => isUnitInCommRange(u, LOCAL_PLAYER_ID));
+    const outOfRangeUnits = targetUnits.filter((u: any) => !isUnitInCommRange(u, LOCAL_PLAYER_ID));
+    for (const unit of outOfRangeUnits) {
+      uiRenderer.addChatMessage({
+        unitId: (unit as any).id,
+        unitType: (unit as any).type,
+        content: 'Out of communication range — cannot receive commands.',
+        type: 'status',
+        gridLabel: (unit as any).getGridLabel(),
+      });
+    }
+    if (inRangeUnits.length === 0) return;
+
     // Classify input as command or question
     const intent = classifyInput(transcript);
 
     if (intent === 'question') {
-      handleUnitQuestion(transcript, targetUnits);
+      handleUnitQuestion(transcript, inRangeUnits);
       return;
     }
 
-    // Set command directly on all targeted units (bypass base range limit)
     // Note: autoReturn is NOT set here — voice commands are managed by the
     // directive system which handles lifecycle. autoReturn is only for
     // simple right-click moves that bypass the commander entirely.
-    for (const unit of targetUnits) {
+    for (const unit of inRangeUnits) {
       (unit as any).setCommand(transcript);
       (unit as any).autoReturn = false;
       uiRenderer.addChatMessage({
@@ -858,7 +910,7 @@ eventBus.on(GameEventType.UNIT_COMMAND, (data: any) => {
     }
 
     // Also deliver via communication for the messaging system
-    const commandableUnits = targetUnits.map((u: any) => ({
+    const commandableUnits = inRangeUnits.map((u: any) => ({
       id: u.id,
       position: u.position,
       playerId: u.playerId,
@@ -872,7 +924,7 @@ eventBus.on(GameEventType.UNIT_COMMAND, (data: any) => {
       engine.getCurrentTick(),
     );
 
-    console.log(`[Command] "${transcript}" sent to ${targetUnits.length} unit(s)`);
+    console.log(`[Command] "${transcript}" sent to ${inRangeUnits.length} unit(s)`);
   }
 });
 
@@ -1189,6 +1241,14 @@ engine.onFrame = () => {
     if (!currentPairs.has(key)) activeSharingPairs.delete(key);
   }
 
+  // ---- Out-of-comm-range unit tracking ----
+  const outOfCommRangeUnitIds = new Set<string>();
+  for (const unit of localUnits) {
+    if (unit.isAlive() && !isUnitInCommRange(unit, LOCAL_PLAYER_ID)) {
+      outOfCommRangeUnitIds.add(unit.id);
+    }
+  }
+
   const renderState: RenderState = {
     tiles: gameMap.tiles,
     units: unitStates,
@@ -1203,6 +1263,7 @@ engine.onFrame = () => {
     heatMapData,
     sharingUnitIds,
     hoveredHex,
+    outOfCommRangeUnitIds,
   };
 
   // ---- Render ----

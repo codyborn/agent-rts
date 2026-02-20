@@ -42,6 +42,8 @@ export interface RenderState {
   sharingUnitIds: Set<string>;
   /** Currently hovered hex tile for hover highlight. */
   hoveredHex: GridPosition | null;
+  /** Unit IDs that are out of communication range of any friendly building. */
+  outOfCommRangeUnitIds: Set<string>;
 }
 
 /**
@@ -503,6 +505,11 @@ export class Renderer {
       if (state.sharingUnitIds.has(unit.id)) {
         this.renderSharingIcon(cx, cy, radius, camera.zoom);
       }
+
+      // No-signal indicator for out-of-comm-range local player units
+      if (unit.playerId === localPlayerId && state.outOfCommRangeUnitIds.has(unit.id)) {
+        this.renderNoSignalIcon(cx, cy, radius, camera.zoom);
+      }
     }
   }
 
@@ -595,6 +602,39 @@ export class Renderer {
       ctx.arc(ix + d * 2.2 * zoom, dotY, dotR, 0, Math.PI * 2);
       ctx.fill();
     }
+
+    ctx.restore();
+  }
+
+  /**
+   * Draw a small crossed-out signal icon above a unit that is out of communication range.
+   */
+  private renderNoSignalIcon(cx: number, cy: number, radius: number, zoom: number): void {
+    const { ctx } = this;
+    const iconSize = 8 * zoom;
+    const ix = cx + radius * 0.6;
+    const iy = cy - radius - 10 * zoom;
+
+    ctx.save();
+
+    // Signal bars (3 ascending bars)
+    ctx.fillStyle = 'rgba(255, 80, 80, 0.9)';
+    const barW = 1.5 * zoom;
+    const gap = 2 * zoom;
+    for (let i = 0; i < 3; i++) {
+      const barH = (i + 1) * 2 * zoom;
+      const bx = ix - iconSize / 2 + i * (barW + gap);
+      const by = iy + iconSize * 0.3 - barH;
+      ctx.fillRect(bx, by, barW, barH);
+    }
+
+    // Red diagonal strikethrough
+    ctx.strokeStyle = '#ff3b30';
+    ctx.lineWidth = 1.5 * zoom;
+    ctx.beginPath();
+    ctx.moveTo(ix - iconSize / 2 - 1 * zoom, iy + iconSize * 0.35);
+    ctx.lineTo(ix + iconSize / 2 - 1 * zoom, iy - iconSize * 0.35);
+    ctx.stroke();
 
     ctx.restore();
   }
