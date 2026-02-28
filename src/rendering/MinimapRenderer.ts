@@ -12,6 +12,8 @@ import {
   PLAYER_COLORS,
   GridPosition,
 } from '../shared/types';
+import { hexToPixel, pixelToHex, HEX_WIDTH, HEX_HEIGHT, HEX_VERT_SPACING } from '../hex/HexUtils';
+import { PALETTE } from './ColorPalette';
 
 /**
  * State snapshot consumed by the minimap renderer each frame.
@@ -72,11 +74,14 @@ export class MinimapRenderer {
     // Recalculate scale each frame in case of resize
     canvas.width = canvas.clientWidth;
     canvas.height = canvas.clientHeight;
-    this.scaleX = canvas.width / config.mapWidth;
-    this.scaleY = canvas.height / config.mapHeight;
+    // Scale based on hex world dimensions
+    const worldW = config.mapWidth * HEX_WIDTH + HEX_WIDTH / 2;
+    const worldH = config.mapHeight * HEX_VERT_SPACING + HEX_HEIGHT * 0.25;
+    this.scaleX = canvas.width / worldW;
+    this.scaleY = canvas.height / worldH;
 
     // Clear
-    ctx.fillStyle = '#000000';
+    ctx.fillStyle = PALETTE.fog.unexplored;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     // Render layers
@@ -98,11 +103,13 @@ export class MinimapRenderer {
    * @returns The grid position corresponding to the click
    */
   handleClick(screenX: number, screenY: number, config: GameConfig): GridPosition {
-    const col = Math.floor(screenX / this.scaleX);
-    const row = Math.floor(screenY / this.scaleY);
+    // Convert minimap pixel to world pixel, then to hex grid position
+    const worldX = screenX / this.scaleX;
+    const worldY = screenY / this.scaleY;
+    const pos = pixelToHex(worldX, worldY);
     return {
-      col: Math.max(0, Math.min(config.mapWidth - 1, col)),
-      row: Math.max(0, Math.min(config.mapHeight - 1, row)),
+      col: Math.max(0, Math.min(config.mapWidth - 1, pos.col)),
+      row: Math.max(0, Math.min(config.mapHeight - 1, pos.row)),
     };
   }
 
@@ -111,24 +118,25 @@ export class MinimapRenderer {
   // ----------------------------------------------------------
 
   /**
-   * Draw each map tile as a small rectangle using terrain colors.
+   * Draw each map tile as a small rectangle using terrain colors, positioned by hex coords.
    */
   private renderTerrain(state: MinimapState): void {
     const { ctx } = this;
     const { tiles, config } = state;
+    const dotW = Math.ceil(HEX_WIDTH * this.scaleX);
+    const dotH = Math.ceil(HEX_VERT_SPACING * this.scaleY);
 
     for (let row = 0; row < config.mapHeight; row++) {
       for (let col = 0; col < config.mapWidth; col++) {
         const tile = tiles[row]?.[col];
         if (!tile) continue;
 
+        const world = hexToPixel({ row, col });
+        const px = world.x * this.scaleX - dotW / 2;
+        const py = world.y * this.scaleY - dotH / 2;
+
         ctx.fillStyle = TERRAIN_COLORS[tile.terrain];
-        ctx.fillRect(
-          col * this.scaleX,
-          row * this.scaleY,
-          Math.ceil(this.scaleX),
-          Math.ceil(this.scaleY)
-        );
+        ctx.fillRect(px, py, dotW, dotH);
       }
     }
   }
@@ -143,23 +151,24 @@ export class MinimapRenderer {
 
     if (!fog || fog.length === 0) return;
 
+    const dotW = Math.ceil(HEX_WIDTH * this.scaleX);
+    const dotH = Math.ceil(HEX_VERT_SPACING * this.scaleY);
+
     for (let row = 0; row < config.mapHeight; row++) {
       for (let col = 0; col < config.mapWidth; col++) {
         const fogTile = fog[row]?.[col];
         if (!fogTile || fogTile === FogState.VISIBLE) continue;
 
         if (fogTile === FogState.UNEXPLORED) {
-          ctx.fillStyle = '#000000';
+          ctx.fillStyle = PALETTE.fog.unexplored;
         } else if (fogTile === FogState.EXPLORED) {
-          ctx.fillStyle = 'rgba(0,0,0,0.6)';
+          ctx.fillStyle = PALETTE.fog.explored;
         }
 
-        ctx.fillRect(
-          col * this.scaleX,
-          row * this.scaleY,
-          Math.ceil(this.scaleX),
-          Math.ceil(this.scaleY)
-        );
+        const world = hexToPixel({ row, col });
+        const px = world.x * this.scaleX - dotW / 2;
+        const py = world.y * this.scaleY - dotH / 2;
+        ctx.fillRect(px, py, dotW, dotH);
       }
     }
   }
@@ -174,38 +183,34 @@ export class MinimapRenderer {
 
     const { ctx } = this;
     const { config, currentTick } = state;
-    const w = Math.ceil(this.scaleX);
-    const h = Math.ceil(this.scaleY);
+    const dotW = Math.ceil(HEX_WIDTH * this.scaleX);
+    const dotH = Math.ceil(HEX_VERT_SPACING * this.scaleY);
 
     for (let row = 0; row < config.mapHeight; row++) {
       for (let col = 0; col < config.mapWidth; col++) {
         const key = `${col},${row}`;
         const lastSeen = state.heatMapData.get(key);
-        const px = col * this.scaleX;
-        const py = row * this.scaleY;
+        const world = hexToPixel({ row, col });
+        const px = world.x * this.scaleX - dotW / 2;
+        const py = world.y * this.scaleY - dotH / 2;
 
         if (lastSeen === undefined) {
-          // Never seen by selected unit(s) — dark overlay
           ctx.fillStyle = 'rgba(0,0,0,0.7)';
-          ctx.fillRect(px, py, w, h);
+          ctx.fillRect(px, py, dotW, dotH);
         } else {
           const age = currentTick - lastSeen;
           if (age <= 1) {
-            // Currently visible — bright green
             ctx.fillStyle = 'rgba(0,255,100,0.4)';
           } else if (age <= 100) {
-            // Recent — fading green
             const alpha = 0.35 * (1 - age / 100);
             ctx.fillStyle = `rgba(0,255,100,${alpha.toFixed(3)})`;
           } else if (age <= 600) {
-            // Old — very dim green
             const alpha = 0.15 * (1 - (age - 100) / 500);
             ctx.fillStyle = `rgba(0,200,80,${Math.max(0, alpha).toFixed(3)})`;
           } else {
-            // Very old — dark
             ctx.fillStyle = 'rgba(0,0,0,0.5)';
           }
-          ctx.fillRect(px, py, w, h);
+          ctx.fillRect(px, py, dotW, dotH);
         }
       }
     }
@@ -222,14 +227,14 @@ export class MinimapRenderer {
       const playerIndex = this.getPlayerIndex(building.playerId);
       const color = PLAYER_COLORS[playerIndex] || PLAYER_COLORS[0];
 
-      const bx = building.position.col * this.scaleX;
-      const by = building.position.row * this.scaleY;
+      const world = hexToPixel(building.position);
+      const bx = world.x * this.scaleX;
+      const by = world.y * this.scaleY;
 
-      // Buildings are drawn slightly larger than a single tile
-      const dotSize = Math.max(3, Math.ceil(this.scaleX * 2));
+      const dotSize = Math.max(3, Math.ceil(HEX_WIDTH * this.scaleX * 2));
 
       ctx.fillStyle = color;
-      ctx.fillRect(bx, by, dotSize, dotSize);
+      ctx.fillRect(bx - dotSize / 2, by - dotSize / 2, dotSize, dotSize);
     }
   }
 
@@ -241,7 +246,6 @@ export class MinimapRenderer {
     const { units, fog, localPlayerId } = state;
 
     for (const unit of units.values()) {
-      // Hide enemy units not in currently visible tiles
       if (unit.playerId !== localPlayerId) {
         const fogRow = fog[unit.position.row];
         if (!fogRow || fogRow[unit.position.col] !== FogState.VISIBLE) continue;
@@ -250,14 +254,14 @@ export class MinimapRenderer {
       const playerIndex = this.getPlayerIndex(unit.playerId);
       const color = PLAYER_COLORS[playerIndex] || PLAYER_COLORS[0];
 
-      const ux = unit.position.col * this.scaleX;
-      const uy = unit.position.row * this.scaleY;
+      const world = hexToPixel(unit.position);
+      const ux = world.x * this.scaleX;
+      const uy = world.y * this.scaleY;
 
-      // Units are small dots (2x2 pixels, scaled)
-      const dotSize = Math.max(2, Math.ceil(this.scaleX));
+      const dotSize = Math.max(2, Math.ceil(HEX_WIDTH * this.scaleX));
 
       ctx.fillStyle = color;
-      ctx.fillRect(ux, uy, dotSize, dotSize);
+      ctx.fillRect(ux - dotSize / 2, uy - dotSize / 2, dotSize, dotSize);
     }
   }
 
@@ -266,14 +270,13 @@ export class MinimapRenderer {
    */
   private renderViewport(state: MinimapState): void {
     const { ctx } = this;
-    const { cameraViewport, config } = state;
-    const { tileSize } = config;
+    const { cameraViewport } = state;
 
     // Convert world-pixel viewport to minimap coordinates
-    const vx = (cameraViewport.x / tileSize) * this.scaleX;
-    const vy = (cameraViewport.y / tileSize) * this.scaleY;
-    const vw = (cameraViewport.width / tileSize) * this.scaleX;
-    const vh = (cameraViewport.height / tileSize) * this.scaleY;
+    const vx = cameraViewport.x * this.scaleX;
+    const vy = cameraViewport.y * this.scaleY;
+    const vw = cameraViewport.width * this.scaleX;
+    const vh = cameraViewport.height * this.scaleY;
 
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 1;

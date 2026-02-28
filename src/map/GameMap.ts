@@ -12,6 +12,7 @@ import {
   TERRAIN_MOVEMENT_COST,
   SCOUT_TERRAIN_BONUS,
 } from '../shared/types';
+import { hexNeighbors } from '../hex/HexUtils';
 
 // ============ Seeded Pseudo-Random Number Generator ============
 
@@ -127,19 +128,6 @@ class ValueNoise {
     return value / maxValue;
   }
 }
-
-// ============ 8-Directional Neighbor Offsets ============
-
-const NEIGHBOR_OFFSETS: ReadonlyArray<{ dc: number; dr: number }> = [
-  { dc: 0, dr: -1 },  // N
-  { dc: 1, dr: -1 },  // NE
-  { dc: 1, dr: 0 },   // E
-  { dc: 1, dr: 1 },   // SE
-  { dc: 0, dr: 1 },   // S
-  { dc: -1, dr: 1 },  // SW
-  { dc: -1, dr: 0 },  // W
-  { dc: -1, dr: -1 }, // NW
-];
 
 // ============ GameMap Class ============
 
@@ -337,8 +325,7 @@ export class GameMap {
       if (current.col === end.col && current.row === end.row) {
         return; // Already connected
       }
-      for (const offset of NEIGHBOR_OFFSETS) {
-        const neighbor = { col: current.col + offset.dc, row: current.row + offset.dr };
+      for (const neighbor of hexNeighbors(current)) {
         const key = `${neighbor.col},${neighbor.row}`;
         if (!visited.has(key) && this.isInBounds(neighbor) && this.tiles[neighbor.row][neighbor.col].walkable) {
           visited.add(key);
@@ -565,20 +552,10 @@ export class GameMap {
   }
 
   /**
-   * Returns all in-bounds neighbors of a position (up to 8 directions).
+   * Returns all in-bounds hex neighbors of a position (6 directions).
    */
   getNeighbors(pos: GridPosition): GridPosition[] {
-    const neighbors: GridPosition[] = [];
-    for (const offset of NEIGHBOR_OFFSETS) {
-      const neighbor: GridPosition = {
-        col: pos.col + offset.dc,
-        row: pos.row + offset.dr,
-      };
-      if (this.isInBounds(neighbor)) {
-        neighbors.push(neighbor);
-      }
-    }
-    return neighbors;
+    return hexNeighbors(pos).filter((n) => this.isInBounds(n));
   }
 
   // ============ Resource & Position Search ============

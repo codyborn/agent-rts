@@ -44,9 +44,16 @@ export function labelToPosition(label: string): GridPosition {
   };
 }
 
-/** Euclidean distance between two grid positions */
+/** Hex distance between two grid positions (number of hex steps). */
 export function gridDistance(a: GridPosition, b: GridPosition): number {
-  return Math.sqrt((a.col - b.col) ** 2 + (a.row - b.row) ** 2);
+  // Inline hex distance using cube coordinates (odd-r offset)
+  const aq = a.col - (a.row - (a.row & 1)) / 2;
+  const ar = a.row;
+  const as_ = -aq - ar;
+  const bq = b.col - (b.row - (b.row & 1)) / 2;
+  const br = b.row;
+  const bs = -bq - br;
+  return Math.max(Math.abs(aq - bq), Math.abs(ar - br), Math.abs(as_ - bs));
 }
 
 /** Manhattan distance between two grid positions */
@@ -227,6 +234,10 @@ export interface UnitState {
 
   // Rendering
   facingDirection: 'left' | 'right';
+
+  // Smooth movement interpolation
+  previousPosition: GridPosition | null;
+  moveStartTime: number;
 }
 
 export interface BuildingState {
@@ -450,12 +461,14 @@ export const SCOUT_TERRAIN_BONUS: Partial<Record<TerrainType, number>> = {
 
 // ============ Rendering Colors ============
 
+import { PALETTE } from '../rendering/ColorPalette';
+
 export const TERRAIN_COLORS: Record<TerrainType, string> = {
-  [TerrainType.PLAINS]:   '#4a7c59',
-  [TerrainType.FOREST]:   '#2d5a27',
-  [TerrainType.MOUNTAIN]: '#8b7355',
-  [TerrainType.WATER]:    '#1a5276',
-  [TerrainType.SWAMP]:    '#4a6741',
+  [TerrainType.PLAINS]:   PALETTE.terrain.plains.base,
+  [TerrainType.FOREST]:   PALETTE.terrain.forest.base,
+  [TerrainType.MOUNTAIN]: PALETTE.terrain.mountain.base,
+  [TerrainType.WATER]:    PALETTE.terrain.water.base,
+  [TerrainType.SWAMP]:    PALETTE.terrain.swamp.base,
 };
 
 export const UNIT_ICONS: Record<UnitType, string> = {
@@ -468,7 +481,7 @@ export const UNIT_ICONS: Record<UnitType, string> = {
   [UnitType.CAPTAIN]:   'C',
 };
 
-export const PLAYER_COLORS = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12'];
+export const PLAYER_COLORS = PALETTE.player;
 
 // ============ Communication Range ============
 

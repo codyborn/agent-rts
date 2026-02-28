@@ -274,6 +274,12 @@ function isUnitInCommRange(unit: { position: GridPosition }, playerId: string): 
   return false;
 }
 
+function playerHasCompletedWatchtower(playerId: string): boolean {
+  return state.getBuildingsForPlayer(playerId).some(
+    (b) => b.type === BuildingType.WATCHTOWER && !b.isConstructing
+  );
+}
+
 function findBuildingAtPosition(gridPos: GridPosition): BuildingState | null {
   for (const building of state.getAllBuildings()) {
     const footprint = building.type === BuildingType.WATCHTOWER ? 1 : 2;
@@ -334,6 +340,20 @@ gameCanvas.addEventListener('mouseup', (e) => {
             }
           }
         }
+      }
+    }
+
+    // Watchtower must be within comm range of an existing completed building
+    if (valid && buildType === BuildingType.WATCHTOWER) {
+      if (!isUnitInCommRange({ position: gridPos }, LOCAL_PLAYER_ID)) {
+        uiRenderer.addChatMessage({
+          unitId: '', unitType: UnitType.ENGINEER,
+          content: 'Watchtower must be built within communication range of a base or building.',
+          type: 'status', gridLabel: positionToLabel(gridPos),
+        });
+        playerController.cancelBuildMode();
+        uiRenderer.hideBuildMenu();
+        return;
       }
     }
 
@@ -511,6 +531,14 @@ uiRenderer.onChatMessageClick((unitId) => {
 uiRenderer.onTrainUnit((buildingId, unitType) => {
   const building = state.getBuilding(buildingId);
   if (!building || building.isConstructing) return;
+  if (unitType === UnitType.MESSENGER && !playerHasCompletedWatchtower(LOCAL_PLAYER_ID)) {
+    uiRenderer.addChatMessage({
+      unitId: buildingId, unitType: UnitType.ENGINEER,
+      content: 'Requires a completed Watchtower.',
+      type: 'status', gridLabel: positionToLabel(building.position),
+    });
+    return;
+  }
   if (!resourceManager.canAfford(LOCAL_PLAYER_ID, UNIT_COSTS[unitType])) return;
   resourceManager.spend(LOCAL_PLAYER_ID, UNIT_COSTS[unitType]);
   building.productionQueue.push(unitType);
@@ -615,6 +643,19 @@ uiRenderer.onBuildMenuSelect((buildingType) => {
   const engineer = engineers[0];
   const buildPos = findBuildLocation(engineer.position, buildingType);
   if (!buildPos) return;
+
+  // Watchtower must be within comm range of an existing completed building
+  if (buildingType === BuildingType.WATCHTOWER) {
+    if (!isUnitInCommRange({ position: buildPos }, LOCAL_PLAYER_ID)) {
+      uiRenderer.addChatMessage({
+        unitId: engineer.id, unitType: engineer.type,
+        content: 'Watchtower must be built within communication range of a base or building.',
+        type: 'status', gridLabel: positionToLabel(engineer.position),
+      });
+      uiRenderer.hideBuildMenu();
+      return;
+    }
+  }
 
   const isSmall = buildingType === BuildingType.WATCHTOWER;
   const footprint = isSmall ? 1 : 2;
@@ -812,6 +853,8 @@ function parseBuildingCommand(
     const countStr = match[1];
     const count = countStr === 'a' || countStr === 'an' ? 1 : parseInt(countStr, 10);
     const typeName = match[2] as UnitType;
+    // Skip messenger if no completed watchtower
+    if (typeName === UnitType.MESSENGER && !playerHasCompletedWatchtower(LOCAL_PLAYER_ID)) continue;
     if (producible.has(typeName) && count > 0 && count <= 20) {
       results.push({ unitType: typeName, count });
     }
@@ -820,6 +863,8 @@ function parseBuildingCommand(
   // If no pattern matched but text mentions a producible unit type, build 1
   if (results.length === 0) {
     for (const ut of producible) {
+      // Skip messenger if no completed watchtower
+      if (ut === UnitType.MESSENGER && !playerHasCompletedWatchtower(LOCAL_PLAYER_ID)) continue;
       if (lower.includes(ut)) {
         results.push({ unitType: ut, count: 1 });
       }
@@ -1292,7 +1337,11 @@ engine.onFrame = () => {
     const building = state.getBuilding(playerController.selectedBuildingId);
     if (building) {
       const res = resourceManager.getResources(LOCAL_PLAYER_ID);
-      uiRenderer.updateBuildingInfo(building, res);
+      const lockedUnitTypes = new Set<UnitType>();
+      if (!playerHasCompletedWatchtower(LOCAL_PLAYER_ID)) {
+        lockedUnitTypes.add(UnitType.MESSENGER);
+      }
+      uiRenderer.updateBuildingInfo(building, res, lockedUnitTypes);
     }
   } else {
     const selectedUnits = unitManager

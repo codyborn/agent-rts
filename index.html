@@ -5,12 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Agent RTS</title>
   <style>
+    :root {
+      --bg-canvas: #12131a;
+      --bg-sidebar: #181c28;
+      --bg-surface: #1e2230;
+      --border-base: #2a3040;
+      --border-highlight: #3a4558;
+      --text-primary: #d8dce4;
+      --text-muted: #6b7280;
+      --text-disabled: #4b5060;
+      --accent-green: #4ade80;
+      --accent-cyan: #67c8e8;
+      --accent-gold: #f0c040;
+      --accent-red: #ef5350;
+      --accent-orange: #e8924a;
+      --radius-sm: 3px;
+      --radius-md: 6px;
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      background: #1a1a2e;
+      background: var(--bg-canvas);
       overflow: hidden;
       font-family: 'Courier New', monospace;
-      color: #e0e0e0;
+      color: var(--text-primary);
     }
     #game-container {
       display: flex;
@@ -27,19 +44,19 @@
       width: 300px;
       min-width: 300px;
       flex-shrink: 0;
-      background: #16213e;
-      border-left: 2px solid #0f3460;
+      background: var(--bg-sidebar);
+      border-left: 1px solid var(--border-base);
       display: flex;
       flex-direction: column;
     }
     #minimap-canvas {
       width: 100%;
       height: 200px;
-      border-bottom: 2px solid #0f3460;
+      border-bottom: 1px solid var(--border-base);
     }
     #unit-info {
       padding: 10px;
-      border-bottom: 2px solid #0f3460;
+      border-bottom: 1px solid var(--border-base);
       min-height: 120px;
       overflow-wrap: break-word;
     }
@@ -48,29 +65,35 @@
       overflow-y: auto;
       padding: 10px;
       font-size: 12px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border-highlight) transparent;
     }
+    #chat-log::-webkit-scrollbar { width: 4px; }
+    #chat-log::-webkit-scrollbar-track { background: transparent; }
+    #chat-log::-webkit-scrollbar-thumb { background: var(--border-highlight); border-radius: 2px; }
     #chat-log .message {
       margin-bottom: 4px;
       cursor: pointer;
       padding: 2px 4px;
-      border-radius: 3px;
+      border-radius: var(--radius-sm);
     }
     #chat-log .message:hover {
-      background: rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.07);
     }
-    #chat-log .command { color: #53d769; }
-    #chat-log .communication { color: #5ac8fa; }
-    #chat-log .observation { color: #ffcc02; }
-    #chat-log .action { color: #ff9500; }
-    #chat-log .status { color: #8e8e93; }
+    #chat-log .command { color: var(--accent-green); }
+    #chat-log .communication { color: var(--accent-cyan); }
+    #chat-log .observation { color: var(--accent-gold); }
+    #chat-log .action { color: var(--accent-orange); }
+    #chat-log .status { color: var(--text-muted); }
     #resource-bar {
       position: fixed;
       top: 0;
       left: 0;
       right: 300px;
       height: 30px;
-      background: #16213e;
-      border-bottom: 2px solid #0f3460;
+      background: var(--bg-sidebar);
+      border-bottom: 1px solid var(--border-base);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
       display: flex;
       align-items: center;
       padding: 0 15px;
@@ -79,15 +102,17 @@
       z-index: 10;
     }
     .resource { display: flex; align-items: center; gap: 5px; }
-    .resource-minerals { color: #5ac8fa; }
-    .resource-energy { color: #ffcc02; }
+    .resource-minerals { color: var(--accent-cyan); }
+    .resource-energy { color: var(--accent-gold); }
     #command-bar {
       position: fixed;
       bottom: 52px;
       left: 50%;
       transform: translateX(-50%);
-      background: rgba(22, 33, 62, 0.95);
-      border: 1px solid #0f3460;
+      background: rgba(24, 28, 40, 0.85);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border: 1px solid var(--border-base);
       border-radius: 8px;
       display: none;
       z-index: 20;
@@ -104,40 +129,40 @@
       background: transparent;
       border: none;
       outline: none;
-      color: #e0e0e0;
+      color: var(--text-primary);
       font-family: 'Courier New', monospace;
       font-size: 13px;
       padding: 10px 14px;
     }
     #command-input::placeholder {
-      color: #555;
+      color: var(--text-disabled);
     }
     #mic-btn {
       background: none;
       border: none;
-      border-left: 1px solid #0f3460;
-      color: #8e8e93;
+      border-left: 1px solid var(--border-base);
+      color: var(--text-muted);
       cursor: pointer;
       padding: 10px 14px;
       display: flex;
       align-items: center;
-      transition: color 0.2s;
+      transition: color 0.15s;
     }
-    #mic-btn:hover { color: #5ac8fa; }
+    #mic-btn:hover { color: var(--accent-cyan); }
     #grid-tooltip {
       position: fixed;
       pointer-events: none;
-      background: rgba(22, 33, 62, 0.9);
-      color: #e0e0e0;
+      background: rgba(24, 28, 40, 0.9);
+      color: var(--text-primary);
       font-size: 11px;
       padding: 2px 6px;
-      border-radius: 3px;
-      border: 1px solid #0f3460;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-base);
       z-index: 30;
       display: none;
     }
     #mic-btn.recording {
-      color: #ff3b30;
+      color: var(--accent-red);
       animation: pulse 1s infinite;
     }
     #voice-indicator {
@@ -145,21 +170,21 @@
       bottom: 10px;
       left: 50%;
       transform: translateX(-50%);
-      background: rgba(22, 33, 62, 0.9);
+      background: rgba(24, 28, 40, 0.9);
       padding: 8px 16px;
       border-radius: 20px;
-      border: 1px solid #0f3460;
+      border: 1px solid var(--border-base);
       display: none;
       z-index: 20;
     }
     #voice-indicator.active {
       display: block;
-      border-color: #ff3b30;
+      border-color: var(--accent-red);
       animation: pulse 1s infinite;
     }
     @keyframes pulse {
       0%, 100% { opacity: 1; }
-      50% { opacity: 0.7; }
+      50% { opacity: 0.85; }
     }
     #hotkey-bar {
       position: fixed;
@@ -167,8 +192,8 @@
       left: 0;
       right: 300px;
       height: 40px;
-      background: #16213e;
-      border-top: 2px solid #0f3460;
+      background: var(--bg-sidebar);
+      border-top: 1px solid var(--border-base);
       display: flex;
       align-items: center;
       padding: 0 10px;
@@ -179,30 +204,35 @@
     .hotkey-slot {
       width: 50px;
       height: 30px;
-      border: 1px solid #0f3460;
+      border: 1px solid var(--border-base);
       border-radius: 4px;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
       font-size: 10px;
+      transition: border-color 0.15s;
     }
-    .hotkey-slot.active { border-color: #53d769; }
-    .hotkey-slot .key { color: #8e8e93; font-size: 9px; }
-    .hotkey-slot .count { color: #e0e0e0; }
+    .hotkey-slot.active { border-color: var(--accent-green); }
+    .hotkey-slot .key { color: var(--text-muted); font-size: 9px; }
+    .hotkey-slot .count { color: var(--text-primary); }
     .train-btn {
-      background: rgba(15, 52, 96, 0.8);
-      border: 1px solid #0f3460;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-base);
       border-radius: 4px;
-      color: #e0e0e0;
+      color: var(--text-primary);
       cursor: pointer;
       padding: 4px 8px;
       font-family: 'Courier New', monospace;
       font-size: 10px;
       text-align: center;
-      transition: background 0.2s, border-color 0.2s;
+      transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
     }
-    .train-btn:hover { background: rgba(15, 52, 96, 1); border-color: #53d769; }
+    .train-btn:hover {
+      background: var(--border-base);
+      border-color: var(--accent-green);
+      box-shadow: 0 0 6px rgba(74,222,128,0.15);
+    }
     .train-btn.disabled {
       opacity: 0.4;
       cursor: not-allowed;
@@ -213,8 +243,10 @@
       bottom: 100px;
       left: 50%;
       transform: translateX(-50%);
-      background: rgba(22, 33, 62, 0.95);
-      border: 1px solid #0f3460;
+      background: rgba(24, 28, 40, 0.85);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border: 1px solid var(--border-base);
       border-radius: 8px;
       padding: 8px;
       display: flex;
@@ -222,18 +254,22 @@
       z-index: 25;
     }
     .build-menu-btn {
-      background: rgba(15, 52, 96, 0.8);
-      border: 1px solid #0f3460;
-      border-radius: 6px;
-      color: #e0e0e0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-base);
+      border-radius: var(--radius-md);
+      color: var(--text-primary);
       cursor: pointer;
       padding: 8px 14px;
       font-family: 'Courier New', monospace;
       font-size: 12px;
       text-align: center;
-      transition: background 0.2s, border-color 0.2s;
+      transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
     }
-    .build-menu-btn:hover { background: rgba(15, 52, 96, 1); border-color: #53d769; }
+    .build-menu-btn:hover {
+      background: var(--border-base);
+      border-color: var(--accent-green);
+      box-shadow: 0 0 6px rgba(74,222,128,0.15);
+    }
   </style>
 </head>
 <body>
@@ -246,7 +282,7 @@
       <span>Energy:</span>
       <span id="energy-count">200</span>
     </div>
-    <div id="tick-display" style="margin-left: auto; color: #8e8e93;">Tick: 0</div>
+    <div id="tick-display" style="margin-left: auto; color: var(--text-muted);">Tick: 0</div>
   </div>
 
   <div id="game-container">
@@ -254,7 +290,7 @@
     <div id="sidebar">
       <canvas id="minimap-canvas"></canvas>
       <div id="unit-info">
-        <div style="color: #8e8e93; font-size: 11px;">No unit selected</div>
+        <div style="color: var(--text-muted); font-size: 11px;">No unit selected</div>
       </div>
       <div id="chat-log"></div>
     </div>

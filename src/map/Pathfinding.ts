@@ -1,15 +1,13 @@
 // ============================================================
 // Agent RTS - A* Pathfinding
-// 8-directional pathfinding with binary heap priority queue
+// 6-directional hex pathfinding with binary heap priority queue
 // ============================================================
 
 import { GridPosition, UnitType } from '../shared/types';
+import { hexDistance } from '../hex/HexUtils';
 
 /** Maximum number of nodes to expand before giving up on a path search. */
 const MAX_NODES = 2000;
-
-/** Precomputed sqrt(2) for diagonal movement cost. */
-const SQRT2 = Math.sqrt(2);
 
 // ============ Binary Min-Heap Priority Queue ============
 
@@ -96,14 +94,11 @@ class MinHeap<T> {
 // ============ Heuristic ============
 
 /**
- * Octile distance heuristic for 8-directional grid movement.
- * This is the optimal heuristic when diagonal moves cost sqrt(2)
- * and cardinal moves cost 1.
+ * Hex distance heuristic for 6-directional hex grid movement.
+ * Admissible and consistent for uniform-cost hex grids.
  */
-function octileDistance(a: GridPosition, b: GridPosition): number {
-  const dx = Math.abs(a.col - b.col);
-  const dy = Math.abs(a.row - b.row);
-  return Math.max(dx, dy) + (SQRT2 - 1) * Math.min(dx, dy);
+function hexDistanceHeuristic(a: GridPosition, b: GridPosition): number {
+  return hexDistance(a, b);
 }
 
 // ============ Position Key ============
@@ -177,7 +172,7 @@ export function findPath(
 
   const startKey = posKey(start);
   gScore.set(startKey, 0);
-  openSet.push(octileDistance(start, end), start);
+  openSet.push(hexDistanceHeuristic(start, end), start);
 
   let nodesExpanded = 0;
 
@@ -209,17 +204,11 @@ export function findPath(
       if (closedSet.has(neighborKey)) continue;
       if (!mapQuery.isWalkable(neighbor)) continue;
 
-      // Calculate movement cost: diagonal or cardinal
-      const dc = Math.abs(neighbor.col - current.col);
-      const dr = Math.abs(neighbor.row - current.row);
-      const isDiagonal = dc === 1 && dr === 1;
-      const stepMultiplier = isDiagonal ? SQRT2 : 1.0;
-
+      // Hex neighbors are all equidistant — uniform step cost
       const terrainCost = mapQuery.getMovementCost(neighbor, unitType);
       if (!isFinite(terrainCost)) continue; // Impassable
 
-      const moveCost = stepMultiplier * terrainCost;
-      const tentativeG = currentG + moveCost;
+      const tentativeG = currentG + terrainCost;
 
       const previousG = gScore.get(neighborKey);
       if (previousG !== undefined && tentativeG >= previousG) {
@@ -229,7 +218,7 @@ export function findPath(
       gScore.set(neighborKey, tentativeG);
       cameFrom.set(neighborKey, current);
 
-      const f = tentativeG + octileDistance(neighbor, end);
+      const f = tentativeG + hexDistanceHeuristic(neighbor, end);
       openSet.push(f, neighbor);
     }
   }

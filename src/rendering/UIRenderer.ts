@@ -16,6 +16,7 @@ import {
   positionToLabel,
   UNIT_ICONS,
 } from '../shared/types';
+import { PALETTE } from './ColorPalette';
 
 /**
  * Updates HTML UI elements in the sidebar and overlay bars.
@@ -43,6 +44,15 @@ export class UIRenderer {
 
   /** Callback for build menu button clicks */
   private buildMenuCallback: ((buildingType: BuildingType) => void) | null = null;
+
+  /** Callback for unit command button clicks */
+  private unitCommandCallback: ((unitIds: string[], command: string) => void) | null = null;
+
+  /** Cache key for unit info panel to avoid per-frame innerHTML rebuilds */
+  private lastUnitInfoKey: string = '';
+
+  /** Cache key for building info panel */
+  private lastBuildingInfoKey: string = '';
 
   constructor() {
     this.mineralsEl = document.getElementById('minerals-count');
@@ -86,9 +96,26 @@ export class UIRenderer {
   updateUnitInfo(units: UnitState[]): void {
     if (!this.unitInfoEl) return;
 
+    // Build a cache key from the data that drives the panel. Only rebuild
+    // the DOM when something has actually changed. This prevents per-frame
+    // innerHTML rebuilds that destroy click-handler-bearing buttons.
+    const key = units.length === 0
+      ? '__empty__'
+      : units
+          .map(
+            (u) =>
+              `${u.id}|${u.type}|${u.health}|${u.energy}|${u.position.col},${u.position.row}|${u.behaviorState}|${u.currentCommand ?? ''}|${u.lastThought ?? ''}|${(u.afflictions || []).map((a) => `${a.type}:${a.duration}`).join(';')}`,
+          )
+          .join('::');
+
+    if (key === this.lastUnitInfoKey) return;
+    this.lastUnitInfoKey = key;
+    // Clear building info cache since we're switching to unit view
+    this.lastBuildingInfoKey = '';
+
     if (units.length === 0) {
       this.unitInfoEl.innerHTML =
-        '<div style="color: #8e8e93; font-size: 11px;">No unit selected</div>';
+        `<div style="color: ${PALETTE.text.muted}; font-size: 11px;">No unit selected</div>`;
       return;
     }
 
@@ -110,18 +137,27 @@ export class UIRenderer {
 
     const healthPercent = stats ? Math.round((unit.health / stats.maxHealth) * 100) : 0;
     const energyPercent = stats ? Math.round((unit.energy / stats.maxEnergy) * 100) : 0;
-    const healthColor = healthPercent > 50 ? '#53d769' : healthPercent > 25 ? '#ffcc02' : '#ff3b30';
-    const energyColor = '#5ac8fa';
+    const healthColor = healthPercent > 50 ? PALETTE.ui.healthHigh : healthPercent > 25 ? PALETTE.ui.healthMid : PALETTE.ui.healthLow;
+    const energyColor = PALETTE.ui.minerals;
 
     const command = unit.currentCommand || 'Idle';
 
     let afflictionHtml = '';
     if (unit.afflictions && unit.afflictions.length > 0) {
       const afflictionList = unit.afflictions
-        .map((a) => `<span style="color: #ff9500;">${a.type} (${a.duration}t)</span>`)
+        .map((a) => `<span style="color: ${PALETTE.accent.orange};">${a.type} (${a.duration}t)</span>`)
         .join(', ');
       afflictionHtml = `<div style="font-size: 10px; margin-top: 4px;">Effects: ${afflictionList}</div>`;
     }
+
+    // Command buttons based on unit type
+    const commands = this.getUnitCommands(unit.type);
+    const commandBtns = commands
+      .map((cmd) => `<button class="train-btn unit-cmd-btn" data-command="${cmd.id}" data-unit-id="${unit.id}">${cmd.label}</button>`)
+      .join('');
+    const commandsHtml = commandBtns
+      ? `<div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px;">${commandBtns}</div>`
+      : '';
 
     this.unitInfoEl.innerHTML = `
       <div style="font-size: 12px; font-weight: bold; margin-bottom: 4px;">
@@ -139,12 +175,26 @@ export class UIRenderer {
           <div style="background: ${energyColor}; height: 100%; width: ${energyPercent}%; border-radius: 2px;"></div>
         </div>
       </div>
-      <div style="font-size: 11px; color: #8e8e93; margin-top: 4px;">
-        Command: <span style="color: #53d769;">${this.escapeHtml(command)}</span>
+      <div style="font-size: 11px; color: ${PALETTE.text.muted}; margin-top: 4px;">
+        Command: <span style="color: ${PALETTE.ui.selection};">${this.escapeHtml(command)}</span>
       </div>
-      ${unit.lastThought ? `<div style="font-size: 10px; color: #5ac8fa; margin-top: 4px; font-style: italic;">"${this.escapeHtml(unit.lastThought)}"</div>` : ''}
+      ${unit.lastThought ? `<div style="font-size: 10px; color: ${PALETTE.accent.cyan}; margin-top: 4px; font-style: italic;">"${this.escapeHtml(unit.lastThought)}"</div>` : ''}
       ${afflictionHtml}
+      ${commandsHtml}
     `;
+
+    // Attach click handlers to command buttons
+    if (this.unitCommandCallback) {
+      const callback = this.unitCommandCallback;
+      const buttons = this.unitInfoEl.querySelectorAll('.unit-cmd-btn');
+      buttons.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const cmdId = btn.getAttribute('data-command')!;
+          const unitId = btn.getAttribute('data-unit-id')!;
+          callback([unitId], cmdId);
+        });
+      });
+    }
   }
 
   private renderMultiUnitInfo(units: UnitState[]): void {
@@ -162,14 +212,40 @@ export class UIRenderer {
       })
       .join(', ');
 
+    // Common commands for multi-selection
+    const unitIds = units.map((u) => u.id);
+    const sharedCmds = [
+      { id: 'stop', label: 'Stop' },
+      { id: 'attack_move', label: 'Attack' },
+      { id: 'defend', label: 'Defend' },
+      { id: 'patrol', label: 'Patrol' },
+    ];
+    const cmdBtns = sharedCmds
+      .map((cmd) => `<button class="train-btn unit-cmd-btn" data-command="${cmd.id}" data-unit-ids="${unitIds.join(',')}">${cmd.label}</button>`)
+      .join('');
+
     this.unitInfoEl.innerHTML = `
       <div style="font-size: 12px; font-weight: bold; margin-bottom: 4px;">
         ${units.length} units selected
       </div>
-      <div style="font-size: 11px; color: #8e8e93;">
+      <div style="font-size: 11px; color: ${PALETTE.text.muted};">
         ${breakdown}
       </div>
+      <div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px;">${cmdBtns}</div>
     `;
+
+    // Attach handlers
+    if (this.unitCommandCallback) {
+      const callback = this.unitCommandCallback;
+      const buttons = this.unitInfoEl.querySelectorAll('.unit-cmd-btn');
+      buttons.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const cmdId = btn.getAttribute('data-command')!;
+          const ids = btn.getAttribute('data-unit-ids')!.split(',');
+          callback(ids, cmdId);
+        });
+      });
+    }
   }
 
   // ----------------------------------------------------------
@@ -182,13 +258,22 @@ export class UIRenderer {
   updateBuildingInfo(
     building: BuildingState,
     resources: Record<ResourceType, number>,
+    lockedUnitTypes: Set<UnitType> = new Set(),
   ): void {
     if (!this.unitInfoEl) return;
+
+    // Dirty check: only rebuild when data changes
+    const lockedStr = Array.from(lockedUnitTypes).sort().join(',');
+    const bKey = `${building.id}|${building.health}|${building.isConstructing}|${Math.round(building.constructionProgress * 100)}|${building.productionQueue.join(',')}|${Math.round(building.productionProgress * 100)}|${resources.minerals}|${resources.energy}|${lockedStr}`;
+    if (bKey === this.lastBuildingInfoKey) return;
+    this.lastBuildingInfoKey = bKey;
+    // Clear unit info cache since we're switching to building view
+    this.lastUnitInfoKey = '';
 
     const typeName = building.type.charAt(0).toUpperCase() + building.type.slice(1);
     const gridLabel = positionToLabel(building.position);
     const healthPercent = Math.round((building.health / building.maxHealth) * 100);
-    const healthColor = healthPercent > 50 ? '#53d769' : healthPercent > 25 ? '#ffcc02' : '#ff3b30';
+    const healthColor = healthPercent > 50 ? PALETTE.ui.healthHigh : healthPercent > 25 ? PALETTE.ui.healthMid : PALETTE.ui.healthLow;
 
     // Get producible units for this building type
     const producible = this.getProducibleUnits(building.type);
@@ -201,10 +286,10 @@ export class UIRenderer {
         .join(', ');
       const progressPct = Math.round(building.productionProgress * 100);
       queueHtml = `
-        <div style="font-size: 10px; margin-top: 6px; color: #ffcc02;">
+        <div style="font-size: 10px; margin-top: 6px; color: ${PALETTE.accent.gold};">
           Producing: ${queueItems} (${progressPct}%)
-          <div style="background: rgba(255,204,2,0.2); height: 4px; border-radius: 2px; margin-top: 1px;">
-            <div style="background: #ffcc02; height: 100%; width: ${progressPct}%; border-radius: 2px;"></div>
+          <div style="background: rgba(240,192,64,0.2); height: 4px; border-radius: 2px; margin-top: 1px;">
+            <div style="background: ${PALETTE.accent.gold}; height: 100%; width: ${progressPct}%; border-radius: 2px;"></div>
           </div>
         </div>
       `;
@@ -216,6 +301,12 @@ export class UIRenderer {
       const buttons = producible.map((ut) => {
         const cost = UNIT_COSTS[ut];
         const name = ut.charAt(0).toUpperCase() + ut.slice(1);
+        const isLocked = lockedUnitTypes.has(ut);
+        if (isLocked) {
+          return `<button class="train-btn disabled" disabled>
+            ${name}<br><span style="font-size: 9px; color: ${PALETTE.accent.orange};">Requires Watchtower</span>
+          </button>`;
+        }
         const canAfford = resources.minerals >= cost.minerals && resources.energy >= cost.energy;
         const disabledClass = canAfford ? '' : ' disabled';
         const costStr = cost.energy > 0
@@ -239,7 +330,7 @@ export class UIRenderer {
           <div style="background: ${healthColor}; height: 100%; width: ${healthPercent}%; border-radius: 2px;"></div>
         </div>
       </div>
-      ${building.isConstructing ? `<div style="font-size: 10px; color: #ffcc02;">Under construction (${Math.round(building.constructionProgress * 100)}%)</div>` : ''}
+      ${building.isConstructing ? `<div style="font-size: 10px; color: ${PALETTE.accent.gold};">Under construction (${Math.round(building.constructionProgress * 100)}%)</div>` : ''}
       ${queueHtml}
       ${trainHtml}
     `;
@@ -273,6 +364,13 @@ export class UIRenderer {
   }
 
   /**
+   * Register a callback for when a unit command button is clicked.
+   */
+  onUnitCommand(callback: (unitIds: string[], command: string) => void): void {
+    this.unitCommandCallback = callback;
+  }
+
+  /**
    * Show a floating build menu with building options and costs.
    */
   showBuildMenu(): void {
@@ -297,7 +395,7 @@ export class UIRenderer {
 
       const btn = document.createElement('button');
       btn.className = 'build-menu-btn';
-      btn.innerHTML = `${label}<br><span style="font-size: 9px; color: #8e8e93;">${costStr}</span>`;
+      btn.innerHTML = `${label}<br><span style="font-size: 9px; color: ${PALETTE.text.muted};">${costStr}</span>`;
       btn.addEventListener('click', () => {
         if (this.buildMenuCallback) {
           this.buildMenuCallback(type);
@@ -329,6 +427,54 @@ export class UIRenderer {
       }
     }
     return result;
+  }
+
+  /**
+   * Get available commands for a unit type.
+   */
+  private getUnitCommands(unitType: UnitType): { id: string; label: string }[] {
+    const common = [
+      { id: 'stop', label: 'Stop' },
+      { id: 'patrol', label: 'Patrol' },
+    ];
+    switch (unitType) {
+      case UnitType.ENGINEER:
+        return [
+          { id: 'gather', label: 'Gather' },
+          { id: 'build', label: 'Build' },
+          ...common,
+        ];
+      case UnitType.SCOUT:
+        return [
+          { id: 'explore', label: 'Explore' },
+          ...common,
+        ];
+      case UnitType.SOLDIER:
+      case UnitType.CAPTAIN:
+        return [
+          { id: 'attack_move', label: 'Attack' },
+          { id: 'defend', label: 'Defend' },
+          ...common,
+        ];
+      case UnitType.SIEGE:
+        return [
+          { id: 'attack_move', label: 'Attack' },
+          { id: 'siege_mode', label: 'Siege' },
+          ...common,
+        ];
+      case UnitType.SPY:
+        return [
+          { id: 'explore', label: 'Infiltrate' },
+          ...common,
+        ];
+      case UnitType.MESSENGER:
+        return [
+          { id: 'explore', label: 'Scout' },
+          ...common,
+        ];
+      default:
+        return common;
+    }
   }
 
   // ----------------------------------------------------------

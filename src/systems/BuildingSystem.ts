@@ -13,6 +13,7 @@ import {
   GridPosition,
 } from '../shared/types';
 import { EventBus } from '../engine/EventBus';
+import { hexNeighbors } from '../hex/HexUtils';
 
 // ============================================================
 // BuildingSystem - Handles building construction and unit
@@ -27,18 +28,6 @@ import { EventBus } from '../engine/EventBus';
 // finishes, it is spawned near the building's rally point (or
 // position) and PRODUCTION_COMPLETED is emitted.
 // ============================================================
-
-/** The eight cardinal + diagonal neighbour offsets. */
-const NEIGHBOR_OFFSETS: ReadonlyArray<{ dRow: number; dCol: number }> = [
-  { dRow: -1, dCol: -1 },
-  { dRow: -1, dCol:  0 },
-  { dRow: -1, dCol:  1 },
-  { dRow:  0, dCol: -1 },
-  { dRow:  0, dCol:  1 },
-  { dRow:  1, dCol: -1 },
-  { dRow:  1, dCol:  0 },
-  { dRow:  1, dCol:  1 },
-];
 
 export class BuildingSystem implements System {
   private eventBus!: EventBus;
@@ -189,12 +178,7 @@ export class BuildingSystem implements System {
   private findSpawnPosition(building: BuildingState): GridPosition {
     const origin: GridPosition = building.rallyPoint ?? building.position;
 
-    for (const offset of NEIGHBOR_OFFSETS) {
-      const candidate: GridPosition = {
-        row: origin.row + offset.dRow,
-        col: origin.col + offset.dCol,
-      };
-
+    for (const candidate of hexNeighbors(origin)) {
       const tile = this.gameState.getTile(candidate);
       if (tile && tile.walkable) {
         return candidate;
@@ -206,10 +190,11 @@ export class BuildingSystem implements System {
   }
 
   /**
-   * Check if an engineer in BUILDING state is adjacent to the building.
+   * Check if an engineer in BUILDING state is on or adjacent to the building.
+   * Buildings are 1-hex footprint; check the building tile itself + its 6 hex neighbors.
    */
   private hasEngineerNearby(building: BuildingState): boolean {
-    const footprint = building.type === BuildingType.WATCHTOWER ? 1 : 2;
+    const neighbors = hexNeighbors(building.position);
     for (const unit of this.unitManager.getUnitsForPlayer(building.playerId)) {
       if (
         unit.type !== UnitType.ENGINEER ||
@@ -218,15 +203,16 @@ export class BuildingSystem implements System {
       ) {
         continue;
       }
-      // Check if engineer is adjacent to any tile in the building footprint
-      for (let dr = -1; dr <= footprint; dr++) {
-        for (let dc = -1; dc <= footprint; dc++) {
-          if (
-            unit.position.row === building.position.row + dr &&
-            unit.position.col === building.position.col + dc
-          ) {
-            return true;
-          }
+      // Check if engineer is on the building tile or any of its 6 neighbors
+      if (
+        unit.position.row === building.position.row &&
+        unit.position.col === building.position.col
+      ) {
+        return true;
+      }
+      for (const n of neighbors) {
+        if (unit.position.row === n.row && unit.position.col === n.col) {
+          return true;
         }
       }
     }

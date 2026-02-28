@@ -62,6 +62,10 @@ export class Unit {
   // Rendering
   public facingDirection: 'left' | 'right' = 'right';
 
+  // Smooth movement interpolation
+  public previousPosition: GridPosition | null = null;
+  public moveStartTime: number = 0;
+
   // Per-unit vision tracking (for heat map overlay)
   public visionHistory: Map<string, number> = new Map();
 
@@ -174,6 +178,7 @@ export class Unit {
 
   /**
    * Advance one step along the current path.
+   * Stores previous position for smooth rendering interpolation.
    * Returns the new position or null if there is no path to follow.
    */
   advanceOnPath(): GridPosition | null {
@@ -182,6 +187,9 @@ export class Unit {
     }
 
     const next = this.path.shift()!;
+    // Store previous position for smooth interpolation
+    this.previousPosition = { col: this.position.col, row: this.position.row };
+    this.moveStartTime = performance.now();
     // Update facing direction based on horizontal movement
     if (next.col > this.position.col) {
       this.facingDirection = 'right';
@@ -268,6 +276,10 @@ export class Unit {
       attackCooldown: this.attackCooldown,
       lastThought: this.lastThought,
       facingDirection: this.facingDirection,
+      previousPosition: this.previousPosition
+        ? { col: this.previousPosition.col, row: this.previousPosition.row }
+        : null,
+      moveStartTime: this.moveStartTime,
     };
   }
 }

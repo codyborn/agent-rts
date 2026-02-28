@@ -3,6 +3,7 @@
 // ============================================================
 
 import { GridPosition, GameConfig } from '../shared/types';
+import { hexToPixel, pixelToHex, HEX_WIDTH, HEX_HEIGHT, HEX_VERT_SPACING } from '../hex/HexUtils';
 
 /**
  * Viewport camera for navigating the game world.
@@ -77,68 +78,73 @@ export class Camera {
 
   /**
    * Convert a grid position to screen coordinates (pixels).
-   * Returns the top-left corner of the tile on screen.
+   * Returns the top-left of the hex bounding box on screen.
    */
-  gridToScreen(pos: GridPosition, tileSize: number): { x: number; y: number } {
-    const worldX = pos.col * tileSize;
-    const worldY = pos.row * tileSize;
-    return this.worldToScreen(worldX, worldY);
+  gridToScreen(pos: GridPosition, _tileSize: number): { x: number; y: number } {
+    const world = hexToPixel(pos);
+    // hexToPixel returns the hex center; offset to top-left of bounding box
+    return this.worldToScreen(world.x - HEX_WIDTH / 2, world.y - HEX_HEIGHT / 2);
   }
 
   /**
-   * Convert screen coordinates to a grid position.
+   * Convert a grid position to its screen center coordinates.
    */
-  screenToGrid(screenX: number, screenY: number, tileSize: number): GridPosition {
+  gridToScreenCenter(pos: GridPosition): { x: number; y: number } {
+    const world = hexToPixel(pos);
+    return this.worldToScreen(world.x, world.y);
+  }
+
+  /**
+   * Convert screen coordinates to a grid position (hex-aware).
+   */
+  screenToGrid(screenX: number, screenY: number, _tileSize: number): GridPosition {
     const world = this.screenToWorld(screenX, screenY);
-    return {
-      col: Math.floor(world.x / tileSize),
-      row: Math.floor(world.y / tileSize),
-    };
+    return pixelToHex(world.x, world.y);
   }
 
   /**
-   * Check if a grid tile is within the visible viewport (with 1-tile margin).
+   * Check if a grid tile is within the visible viewport (with margin).
    */
-  isGridVisible(pos: GridPosition, tileSize: number): boolean {
-    const screen = this.gridToScreen(pos, tileSize);
-    const tileSizeOnScreen = tileSize * this.zoom;
+  isGridVisible(pos: GridPosition, _tileSize: number): boolean {
+    const screen = this.gridToScreen(pos, 0);
+    const w = HEX_WIDTH * this.zoom;
+    const h = HEX_HEIGHT * this.zoom;
     return (
-      screen.x + tileSizeOnScreen >= -tileSizeOnScreen &&
-      screen.y + tileSizeOnScreen >= -tileSizeOnScreen &&
-      screen.x < this.width + tileSizeOnScreen &&
-      screen.y < this.height + tileSizeOnScreen
+      screen.x + w >= -w &&
+      screen.y + h >= -h &&
+      screen.x < this.width + w &&
+      screen.y < this.height + h
     );
   }
 
   /**
-   * Calculate which grid tiles are visible on screen.
+   * Calculate which grid tiles are visible on screen (hex-aware).
    * Returns min/max col/row clamped to map bounds.
    */
   getVisibleGridBounds(
-    tileSize: number,
+    _tileSize: number,
     mapWidth: number,
     mapHeight: number
   ): { minCol: number; maxCol: number; minRow: number; maxRow: number } {
     const topLeft = this.screenToWorld(0, 0);
     const bottomRight = this.screenToWorld(this.width, this.height);
 
-    const minCol = Math.max(0, Math.floor(topLeft.x / tileSize) - 1);
-    const minRow = Math.max(0, Math.floor(topLeft.y / tileSize) - 1);
-    const maxCol = Math.min(mapWidth - 1, Math.ceil(bottomRight.x / tileSize) + 1);
-    const maxRow = Math.min(mapHeight - 1, Math.ceil(bottomRight.y / tileSize) + 1);
+    const minCol = Math.max(0, Math.floor((topLeft.x - HEX_WIDTH) / HEX_WIDTH) - 1);
+    const minRow = Math.max(0, Math.floor((topLeft.y - HEX_HEIGHT) / HEX_VERT_SPACING) - 1);
+    const maxCol = Math.min(mapWidth - 1, Math.ceil(bottomRight.x / HEX_WIDTH) + 1);
+    const maxRow = Math.min(mapHeight - 1, Math.ceil(bottomRight.y / HEX_VERT_SPACING) + 1);
 
     return { minCol, maxCol, minRow, maxRow };
   }
 
   /**
-   * Center the camera on a given grid position.
+   * Center the camera on a given grid position (hex-aware).
    */
-  centerOn(pos: GridPosition, tileSize: number): void {
-    const worldX = pos.col * tileSize + tileSize / 2;
-    const worldY = pos.row * tileSize + tileSize / 2;
+  centerOn(pos: GridPosition, _tileSize: number): void {
+    const world = hexToPixel(pos);
 
-    this.x = worldX - this.width / (2 * this.zoom);
-    this.y = worldY - this.height / (2 * this.zoom);
+    this.x = world.x - this.width / (2 * this.zoom);
+    this.y = world.y - this.height / (2 * this.zoom);
 
     this.clampPosition();
   }

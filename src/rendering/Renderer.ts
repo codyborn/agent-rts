@@ -22,6 +22,7 @@ import { Camera } from './Camera';
 import { SpriteManager, behaviorToAnimState } from './SpriteManager';
 import { TerrainTextureManager, TEX_W, TEX_H } from './TerrainTextureManager';
 import { hexToPixel, traceHexPath, HEX_SIZE, HEX_WIDTH, HEX_HEIGHT } from '../hex/HexUtils';
+import { PALETTE } from './ColorPalette';
 
 /**
  * State snapshot consumed by the renderer each frame.
@@ -76,7 +77,7 @@ export class Renderer {
   render(state: RenderState): void {
     const { ctx, canvas } = this;
 
-    ctx.fillStyle = '#1a1a2e';
+    ctx.fillStyle = PALETTE.bg.canvas;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     this.renderTerrain(state);
@@ -110,8 +111,8 @@ export class Renderer {
     const drawW = TEX_W * camera.zoom;
     const drawH = TEX_H * camera.zoom;
 
-    // Compute water animation frame once (cycles every 500ms)
-    const waterAnimFrame = Math.floor(performance.now() / 500) % 3;
+    // Compute water animation frame once (cycles every 700ms for calmer feel)
+    const waterAnimFrame = Math.floor(performance.now() / 700) % 3;
 
     for (let row = bounds.minRow; row <= bounds.maxRow; row++) {
       for (let col = bounds.minCol; col <= bounds.maxCol; col++) {
@@ -131,7 +132,7 @@ export class Renderer {
           const indicatorSize = scaledSize * 0.25;
 
           if (tile.resource === ResourceType.MINERALS) {
-            ctx.fillStyle = '#5ac8fa';
+            ctx.fillStyle = PALETTE.ui.minerals;
             ctx.beginPath();
             ctx.moveTo(center.x, center.y - indicatorSize);
             ctx.lineTo(center.x + indicatorSize, center.y);
@@ -140,7 +141,7 @@ export class Renderer {
             ctx.closePath();
             ctx.fill();
           } else if (tile.resource === ResourceType.ENERGY) {
-            ctx.fillStyle = '#ffcc02';
+            ctx.fillStyle = PALETTE.ui.energy;
             ctx.beginPath();
             ctx.arc(center.x, center.y, indicatorSize, 0, Math.PI * 2);
             ctx.fill();
@@ -158,7 +159,7 @@ export class Renderer {
     const bounds = camera.getVisibleGridBounds(tileSize, config.mapWidth, config.mapHeight);
     const scaledSize = HEX_SIZE * camera.zoom;
 
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.strokeStyle = PALETTE.grid.lines;
     ctx.lineWidth = 1;
 
     for (let row = bounds.minRow; row <= bounds.maxRow; row++) {
@@ -172,7 +173,7 @@ export class Renderer {
     // Column labels along the top
     const labelFontSize = Math.max(8, Math.min(12, scaledSize * 0.6));
     ctx.font = `${labelFontSize}px 'Courier New', monospace`;
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillStyle = PALETTE.grid.labels;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
 
@@ -242,14 +243,14 @@ export class Renderer {
     const progress = building.constructionProgress; // 0.0 – 1.0
 
     // ---- Foundation outline (always visible) ----
-    ctx.strokeStyle = 'rgba(139, 90, 43, 0.7)';
+    ctx.strokeStyle = PALETTE.building.foundation;
     ctx.lineWidth = 1.5 * camera.zoom;
     ctx.setLineDash([4 * camera.zoom, 3 * camera.zoom]);
     ctx.strokeRect(screen.x + 1, screen.y + 1, bWidth - 2, bHeight - 2);
     ctx.setLineDash([]);
 
     // ---- Foundation fill ----
-    ctx.fillStyle = 'rgba(90, 60, 30, 0.25)';
+    ctx.fillStyle = PALETTE.building.scaffold;
     ctx.fillRect(screen.x, screen.y, bWidth, bHeight);
 
     // ---- Partial building sprite (clip from bottom up) ----
@@ -272,18 +273,27 @@ export class Renderer {
       ctx.imageSmoothingEnabled = true;
 
       // ---- Construction edge line (top of revealed portion) ----
-      ctx.strokeStyle = 'rgba(255, 204, 2, 0.6)';
+      ctx.strokeStyle = PALETTE.building.constructionEdge;
       ctx.lineWidth = 1 * camera.zoom;
       ctx.beginPath();
       ctx.moveTo(screen.x, dstY);
       ctx.lineTo(screen.x + bWidth, dstY);
       ctx.stroke();
+
+      // ---- Construction sparkle (1-2 small yellow spark pixels) ----
+      const now = performance.now();
+      const sparkX1 = screen.x + ((now * 0.03) % bWidth);
+      const sparkX2 = screen.x + ((now * 0.05 + bWidth * 0.4) % bWidth);
+      ctx.fillStyle = 'rgba(240, 192, 64, 0.8)';
+      ctx.fillRect(sparkX1, dstY - 1, 2 * camera.zoom, 2 * camera.zoom);
+      ctx.fillStyle = 'rgba(240, 192, 64, 0.5)';
+      ctx.fillRect(sparkX2, dstY - 1, 1.5 * camera.zoom, 1.5 * camera.zoom);
     }
 
     // ---- Scaffold lines (cross-braces over unrevealed area) ----
     const unrevealedHeight = bHeight - revealPixels;
     if (unrevealedHeight > 4 * camera.zoom) {
-      ctx.strokeStyle = 'rgba(139, 90, 43, 0.35)';
+      ctx.strokeStyle = PALETTE.building.scaffold;
       ctx.lineWidth = 1 * camera.zoom;
       // Vertical scaffold poles
       const poleX1 = screen.x + bWidth * 0.25;
@@ -303,7 +313,7 @@ export class Renderer {
         ctx.stroke();
       }
       // Cross diagonals
-      ctx.strokeStyle = 'rgba(139, 90, 43, 0.2)';
+      ctx.strokeStyle = 'rgba(110,80,50,0.2)';
       ctx.beginPath();
       ctx.moveTo(poleX1, screen.y);
       ctx.lineTo(poleX2, screen.y + unrevealedHeight);
@@ -325,7 +335,7 @@ export class Renderer {
     ctx.fillStyle = 'rgba(80, 80, 80, 0.6)';
     ctx.fillRect(barX, barY, barWidth, barHeight);
     // Fill
-    ctx.fillStyle = '#ffcc02';
+    ctx.fillStyle = PALETTE.accent.gold;
     ctx.fillRect(barX, barY, barWidth * progress, barHeight);
 
     // Percentage label
@@ -356,9 +366,9 @@ export class Renderer {
         const center = camera.gridToScreenCenter({ col, row });
 
         if (fogTile === FogState.UNEXPLORED) {
-          ctx.fillStyle = '#000000';
+          ctx.fillStyle = PALETTE.fog.unexplored;
         } else if (fogTile === FogState.EXPLORED) {
-          ctx.fillStyle = 'rgba(0,0,0,0.6)';
+          ctx.fillStyle = PALETTE.fog.explored;
         }
         traceHexPath(ctx, center.x, center.y, scaledSize);
         ctx.fill();
@@ -408,7 +418,7 @@ export class Renderer {
     }
 
     // Label
-    ctx.fillStyle = 'rgba(0,255,100,0.8)';
+    ctx.fillStyle = `rgba(74,222,128,0.8)`;
     ctx.font = "bold 14px 'Courier New', monospace";
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
@@ -463,10 +473,11 @@ export class Renderer {
         this.renderUnitPath(unit, cx, cy, tileSize, size);
       }
 
-      // Selection ring
+      // Selection ring with pulsing alpha
       if (selectedUnitIds.has(unit.id)) {
-        ctx.strokeStyle = '#53d769';
-        ctx.lineWidth = 2 * camera.zoom;
+        const pulseAlpha = Math.sin(now / 400) * 0.15 + 0.85;
+        ctx.strokeStyle = `rgba(74, 222, 128, ${pulseAlpha.toFixed(2)})`;
+        ctx.lineWidth = 2.5 * camera.zoom;
         ctx.beginPath();
         ctx.arc(cx, cy, radius + 2 * camera.zoom, 0, Math.PI * 2);
         ctx.stroke();
@@ -522,20 +533,39 @@ export class Renderer {
   ): void {
     const { ctx, camera } = this;
 
-    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    // Shorter dash pattern
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
     ctx.lineWidth = 1;
-    ctx.setLineDash([4 * camera.zoom, 4 * camera.zoom]);
+    ctx.setLineDash([2 * camera.zoom, 4 * camera.zoom]);
 
     ctx.beginPath();
     ctx.moveTo(startCx, startCy);
 
-    for (const waypoint of unit.path!) {
+    for (let i = 0; i < unit.path!.length; i++) {
+      const waypoint = unit.path![i];
       const wpCenter = camera.gridToScreenCenter(waypoint);
       ctx.lineTo(wpCenter.x, wpCenter.y);
     }
 
     ctx.stroke();
     ctx.setLineDash([]);
+
+    // Small diamond waypoint markers that fade with distance
+    for (let i = 0; i < unit.path!.length; i++) {
+      const waypoint = unit.path![i];
+      const wpCenter = camera.gridToScreenCenter(waypoint);
+      const fadeFactor = Math.max(0.1, 1 - i / unit.path!.length);
+      const markerSize = 2 * camera.zoom;
+
+      ctx.fillStyle = `rgba(255,255,255,${(0.3 * fadeFactor).toFixed(2)})`;
+      ctx.beginPath();
+      ctx.moveTo(wpCenter.x, wpCenter.y - markerSize);
+      ctx.lineTo(wpCenter.x + markerSize, wpCenter.y);
+      ctx.lineTo(wpCenter.x, wpCenter.y + markerSize);
+      ctx.lineTo(wpCenter.x - markerSize, wpCenter.y);
+      ctx.closePath();
+      ctx.fill();
+    }
   }
 
   private renderHealthBar(
@@ -560,7 +590,7 @@ export class Renderer {
     ctx.fillRect(barX, barY, barWidth, barHeight);
 
     const healthColor =
-      healthPercent > 0.5 ? '#53d769' : healthPercent > 0.25 ? '#ffcc02' : '#ff3b30';
+      healthPercent > 0.5 ? PALETTE.ui.healthHigh : healthPercent > 0.25 ? PALETTE.ui.healthMid : PALETTE.ui.healthLow;
     ctx.fillStyle = healthColor;
     ctx.fillRect(barX, barY, barWidth * healthPercent, barHeight);
   }
@@ -594,7 +624,7 @@ export class Renderer {
     ctx.fill();
 
     // "..." dots inside the bubble
-    ctx.fillStyle = '#5ac8fa';
+    ctx.fillStyle = PALETTE.accent.cyan;
     const dotR = 0.7 * zoom;
     const dotY = iy - iconSize * 0.05;
     for (let d = -1; d <= 1; d++) {
@@ -618,7 +648,7 @@ export class Renderer {
     ctx.save();
 
     // Signal bars (3 ascending bars)
-    ctx.fillStyle = 'rgba(255, 80, 80, 0.9)';
+    ctx.fillStyle = 'rgba(239, 83, 80, 0.9)';
     const barW = 1.5 * zoom;
     const gap = 2 * zoom;
     for (let i = 0; i < 3; i++) {
@@ -629,7 +659,7 @@ export class Renderer {
     }
 
     // Red diagonal strikethrough
-    ctx.strokeStyle = '#ff3b30';
+    ctx.strokeStyle = PALETTE.accent.red;
     ctx.lineWidth = 1.5 * zoom;
     ctx.beginPath();
     ctx.moveTo(ix - iconSize / 2 - 1 * zoom, iy + iconSize * 0.35);
@@ -688,13 +718,13 @@ export class Renderer {
 
     // Green or red tint hex overlay
     ctx.globalAlpha = 0.3;
-    ctx.fillStyle = valid ? '#00ff00' : '#ff0000';
+    ctx.fillStyle = valid ? PALETTE.accent.green : PALETTE.accent.red;
     traceHexPath(ctx, center.x, center.y, scaledSize);
     ctx.fill();
     ctx.globalAlpha = 1.0;
 
     // Hex border
-    ctx.strokeStyle = valid ? '#00ff00' : '#ff0000';
+    ctx.strokeStyle = valid ? PALETTE.accent.green : PALETTE.accent.red;
     ctx.lineWidth = 2;
     ctx.setLineDash([4, 4]);
     traceHexPath(ctx, center.x, center.y, scaledSize);
@@ -705,7 +735,7 @@ export class Renderer {
   }
 
   /**
-   * Draw a bright outline on the hovered hex tile.
+   * Draw a bright outline on the hovered hex tile with slowly pulsing alpha.
    */
   private renderHoverHighlight(state: RenderState): void {
     if (!state.hoveredHex) return;
@@ -716,12 +746,14 @@ export class Renderer {
     const center = camera.gridToScreenCenter(state.hoveredHex);
     const scaledSize = HEX_SIZE * camera.zoom;
 
+    const pulseAlpha = Math.sin(performance.now() / 600) * 0.1 + 0.45;
+
     ctx.save();
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.strokeStyle = `rgba(255, 255, 255, ${pulseAlpha.toFixed(2)})`;
     ctx.lineWidth = 2 * camera.zoom;
     traceHexPath(ctx, center.x, center.y, scaledSize);
     ctx.stroke();
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.06)';
     traceHexPath(ctx, center.x, center.y, scaledSize);
     ctx.fill();
     ctx.restore();
@@ -733,13 +765,13 @@ export class Renderer {
     const { ctx } = this;
     const { x, y, width, height } = state.selectionRect;
 
-    ctx.strokeStyle = '#53d769';
+    ctx.strokeStyle = PALETTE.ui.selection;
     ctx.lineWidth = 1;
     ctx.setLineDash([6, 3]);
     ctx.strokeRect(x, y, width, height);
     ctx.setLineDash([]);
 
-    ctx.fillStyle = 'rgba(83, 215, 105, 0.1)';
+    ctx.fillStyle = 'rgba(74, 222, 128, 0.08)';
     ctx.fillRect(x, y, width, height);
   }
 

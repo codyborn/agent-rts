@@ -138,8 +138,8 @@ export class Selection {
       let closestDist = Infinity;
 
       for (const unit of playerUnits) {
+        // gridToScreen returns top-left of hex bounding box; compute center
         const screenPos = gridToScreen(unit.position);
-        // Center of the tile
         const unitX = screenPos.x + tileSize / 2;
         const unitY = screenPos.y + tileSize / 2;
 
@@ -147,8 +147,8 @@ export class Selection {
           (clickX - unitX) ** 2 + (clickY - unitY) ** 2
         );
 
-        // Only select units within a reasonable click radius
-        if (dist < tileSize && dist < closestDist) {
+        // Only select units within a reasonable click radius (use max dimension)
+        if (dist < tileSize * 0.75 && dist < closestDist) {
           closestDist = dist;
           closestId = unit.id;
         }
@@ -169,6 +169,7 @@ export class Selection {
     const selected: string[] = [];
 
     for (const unit of playerUnits) {
+      // gridToScreen returns top-left of hex bounding box; compute center
       const screenPos = gridToScreen(unit.position);
       const unitCenterX = screenPos.x + tileSize / 2;
       const unitCenterY = screenPos.y + tileSize / 2;
